@@ -57,7 +57,8 @@ const DEFAULT_CONFIG = {
   },
   proxy: {
     url: '',
-    hosts: ['anyrouter']
+    hosts: ['anyrouter'],
+    useForBrowser: true
   },
   recallAdd: true
 }

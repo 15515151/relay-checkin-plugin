@@ -39,6 +39,7 @@ try {
   assert.equal(cfg.bind.groupRecallSec, 60)
   assert.equal(cfg.proxy.url, '')
   assert.deepEqual(cfg.proxy.hosts, ['anyrouter'])
+  assert.equal(cfg.proxy.useForBrowser, true)
   assert.equal(cfg.schedule.concurrency, 3)
   assert.equal(cfg.browser.maxConcurrentPages, 2)
   // 手动指令的整体超时预算 = slotWaitSec + 120s，必须严格大于排队上限，
@@ -60,6 +61,10 @@ try {
   assert.equal(matchProxy('agentrouter.org', { url: P, hosts: [] }), P, '空 hosts 应全部走代理')
   assert.equal(matchProxy('anyrouter.top', { url: '', hosts: ['anyrouter'] }), null, '未配置代理地址不走代理')
   assert.equal(matchProxy('anyrouter.top', null), null)
+  // 浏览器是否走显式代理由 proxy.useForBrowser 控制（TUN 模式需关掉避免环路）
+  const { proxyForHost } = await import('../models/adapters/common.js')
+  assert.equal(proxyForHost('anyrouter.top'), null, '默认未配置代理地址时不走代理')
+  assert.equal(proxyForHost('anyrouter.top', true), null)
   assert.equal(quotaToUsd(500000), '$1.00')
   assert.equal(quotaToUsd('250000'), '$0.50')
   assert.equal(quotaToUsd('abc'), null)

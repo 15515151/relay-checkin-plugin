@@ -161,9 +161,23 @@ async function getBrowser(pool, proxy) {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled'
+        '--disable-blink-features=AutomationControlled',
+        // 控制资源占用：WAF 挑战页会 JS 自刷新，不限制时可能吃满 CPU/内存
+        // 把宿主机拖到无法调度（表现为整个机器人卡死、定时器都不触发）
+        '--disable-gpu',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-features=TranslateUI,BackForwardCache',
+        '--renderer-process-limit=1',
+        '--js-flags=--max-old-space-size=256',
+        '--no-first-run'
       ]
-      if (proxy?.server) args.push(`--proxy-server=${proxy.server}`)
+      if (proxy?.server) {
+        args.push(`--proxy-server=${proxy.server}`)
+        // 让 Chrome 到代理自身（本机回环）的连接不再经过代理，
+        // 避免 Clash 等开启 TUN/系统代理时形成环路把请求打进黑洞
+        args.push('--proxy-bypass-list=<-loopback>')
+      }
       // protocolTimeout 给所有 CDP 调用兜底（setCookie/evaluate 等在浏览器无响应时
       // 会永久挂起且不受 launch 的 timeout 约束）；timeout 管启动连接本身
       return await puppeteer.launch({
@@ -222,11 +236,46 @@ function scheduleIdleClose(pool, idleMs = null) {
  * 打开一个已注入 stealth 的页面执行任务，自动关闭页面并调度浏览器空闲回收
  * @param {string} host 目标站点 host（用于判断是否走代理）
  */
+/**
+ * 浏览器方案熔断：某站点连续失败达到阈值后临时停用一段时间。
+ * 打不开的站点会让 Chrome 反复重试并可能拖慢宿主机，熔断可避免定时任务
+ * 每天在同一个站上白耗资源、影响其他站点与机器人本身
+ */
+const breaker = new Map() // host -> { fails, until }
+const BREAK_THRESHOLD = 3
+const BREAK_MS = 30 * 60 * 1000
+
+function checkBreaker(host) {
+  const b = breaker.get(host)
+  if (!b?.until) return
+  if (Date.now() < b.until) {
+    const mins = Math.ceil((b.until - Date.now()) / 60000)
+    throw new Error(`该站点浏览器方案连续失败已暂停，约 ${mins} 分钟后自动恢复`)
+  }
+  breaker.delete(host)
+}
+
+function noteResult(host, ok) {
+  if (ok) {
+    breaker.delete(host)
+    return
+  }
+  const b = breaker.get(host) || { fails: 0, until: 0 }
+  b.fails++
+  if (b.fails >= BREAK_THRESHOLD) {
+    b.until = Date.now() + BREAK_MS
+    b.fails = 0
+    logger.warn(`[relay-checkin-plugin] ${host} 浏览器方案连续失败 ${BREAK_THRESHOLD} 次，暂停 ${BREAK_MS / 60000} 分钟`)
+  }
+  breaker.set(host, b)
+}
+
 async function withPage(host, fn) {
+  checkBreaker(host)
   await acquirePageSlot()
   // 外层只负责槽位：内部任何异常（含取配置/解析代理失败）都不会漏掉释放
   try {
-    const proxy = parseProxy(proxyForHost(host))
+    const proxy = parseProxy(proxyForHost(host, true))
     const mode = proxy?.server || 'direct'
     const pool = getPool(mode)
     if (pool.idleTimer) {
@@ -245,7 +294,12 @@ async function withPage(host, fn) {
       await withTimeout(page.setUserAgent(getConfig().request.userAgent), 15000, '设置 UA 超时（浏览器无响应）')
       await withTimeout(page.evaluateOnNewDocument(STEALTH_SCRIPT), 15000, '注入初始化脚本超时（浏览器无响应）')
       logger.info('[relay-checkin-plugin] 页面初始化完成')
-      return await fn(page)
+      const out = await fn(page)
+      noteResult(host, !out?.wafBlocked)
+      return out
+    } catch (err) {
+      noteResult(host, false)
+      throw err
     } finally {
       // 关闭也可能挂起（挑战页忙循环等），必须带超时否则计数永久失衡
       if (page) await withTimeout(page.close(), 15000, '关闭页面超时').catch(() => {})

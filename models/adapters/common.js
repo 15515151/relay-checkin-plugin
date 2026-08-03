@@ -13,9 +13,14 @@ export function matchProxy(host, proxyCfg) {
 
 /**
  * 当前配置下某 host 应使用的代理地址（无需代理返回 null）
+ * @param {boolean} forBrowser 无头浏览器用：proxy.useForBrowser=false 时返回 null
+ *   （Clash 等开启 TUN/系统代理时，Chrome 显式走 --proxy-server 可能形成环路，
+ *   此时应让浏览器直连、由系统层透明代理转发）
  */
-export function proxyForHost(host) {
-  return matchProxy(host, getConfig().proxy)
+export function proxyForHost(host, forBrowser = false) {
+  const cfg = getConfig().proxy
+  if (forBrowser && cfg?.useForBrowser === false) return null
+  return matchProxy(host, cfg)
 }
 
 let proxyAgentCache = null
