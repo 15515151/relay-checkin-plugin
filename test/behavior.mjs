@@ -82,6 +82,18 @@ try {
   r = await agentrouter.checkin(AR)
   assert.equal(r.ok, false)
 
+  // ---- 3.4 人机验证类拦截：browser.enable=false 时不降级，原因原样透出 ----
+  // （needsBrowser 覆盖 turnstile 明示与「缺少完整性标记/请刷新页面」等魔改站提示）
+  for (const msg of ['Turnstile token 为空', '游戏动作缺少完整性标记，请刷新页面后重试']) {
+    routes = {
+      'POST https://newapi.test/api/user/checkin': { status: 200, body: { success: false, message: msg } },
+      'GET https://newapi.test/api/user/self': { status: 200, body: { success: true, data: { id: 1, quota: 500000, used_quota: 0 } } }
+    }
+    const res = await checkinAccount({ name: 'newapi.test', baseUrl: 'https://newapi.test', type: 'newapi', token: 't' })
+    assert.equal(res.status, 'fail')
+    assert.equal(res.balance, '$1.00', '签到失败也应查询余额')
+  }
+
   // ---- 3.5 checkinEntry autoOnly：定时任务只签单账号开关打开的 ----
   routes = {
     'POST https://agentrouter.org/api/user/sign_in': { status: 200, body: { success: true, message: '签到成功' } },

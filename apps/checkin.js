@@ -1,7 +1,8 @@
 import { getConfig } from '../models/config.js'
-import { touchEntry, upsertAccount, removeAccount, setAuto, setAccountAuto, accountLabel, persist, setPushGroup } from '../models/store.js'
+import { touchEntry, upsertAccount, removeAccount, setAuto, setAccountAuto, accountLabel, persist, setPushGroup, rememberGroup } from '../models/store.js'
 import { probeAccount, normalizeBaseUrl, getAdapter, cookieTypeForHost } from '../models/adapters/index.js'
 import { checkinEntry, checkinAccount, queryEntry, refreshBalances } from '../models/executor.js'
+import { withUserLock } from '../models/lock.js'
 import { renderResult, renderList, renderHelp } from '../models/render.js'
 import { runScheduledCheckin } from '../models/scheduler.js'
 
@@ -22,6 +23,19 @@ function clearPending(userId) {
     pendingBinds.delete(String(userId))
   }
   return pending
+}
+
+/**
+ * 布设（或重置）绑定会话的超时定时器：超时后取消会话并两端回执
+ */
+function armBindTimeout(pending, timeoutSec) {
+  if (pending.timer) clearTimeout(pending.timer)
+  pending.timer = setTimeout(async () => {
+    pendingBinds.delete(pending.userId)
+    await recallBindPrompt(pending)
+    await notifyBindPrivate(pending, `中转站 ${pending.host} 绑定超时，已取消，可重新发送添加指令`)
+    await notifyBindGroup(pending, `中转站 ${pending.host} 绑定超时，已取消`)
+  }, timeoutSec * 1000)
 }
 
 /**
@@ -54,6 +68,56 @@ function rawText(e) {
     if (t) return t
   }
   return String(e.raw_message ?? e.msg ?? '').trim()
+}
+
+/**
+ * 按账号数量与类型生成签到等待提示：账号多或含需过 WAF/人机验证的站点时
+ * 明确告知预计耗时，避免用户以为卡死而重复发指令
+ */
+function progressTip(accounts) {
+  const total = accounts.length
+  if (total <= 1) return '正在签到，请稍候...'
+
+  // 浏览器方案站点（过 WAF / 人机验证）单个约 30~60 秒，普通 API 站约 1~3 秒
+  const heavy = accounts.filter(acc => acc.type === 'anyrouter').length
+  const estSec = heavy * 45 + (total - heavy) * 3
+  const estText = estSec >= 60 ? `约 ${Math.ceil(estSec / 60)} 分钟` : `约 ${Math.max(5, Math.ceil(estSec / 5) * 5)} 秒`
+  let tip = `正在为你的 ${total} 个账号依次签到，预计${estText}，完成后统一出图，请勿重复发送指令`
+  if (heavy > 0) {
+    tip += `\n（其中 ${heavy} 个站点需过人机验证，走无头浏览器，耗时较长属正常）`
+  }
+  return tip
+}
+
+/**
+ * 兜底防挂起：验证/签到流程无论卡在哪一层，都给出明确失败而不是永久静默。
+ * 预算必须大于「排队等浏览器空闲」的上限，否则会出现「已告知用户超时失败、
+ * 任务稍后拿到槽位却真的签到了」的自相矛盾结果
+ */
+function hangBudgetMs() {
+  try {
+    // 与 acquirePageSlot 同样 clamp（配置写成字符串/负数也不会失控）；
+    // 加数需覆盖单账号浏览器执行段的上界（启动+开页+打开站点+过 WAF+重试+关页 ≈ 266s）
+    const sec = Number(getConfig().browser.slotWaitSec) || 120
+    return (Math.max(30, Math.min(sec, 600)) + 300) * 1000
+  } catch {
+    // 取配置失败（如 data 目录不可写）不能让调用方同步抛出：
+    // 那会导致已在飞行的请求 promise 无人接管，触发 unhandledRejection 退进程
+    return 420000
+  }
+}
+
+function guardHang(promise, label, ms = hangBudgetMs()) {
+  let timer = null
+  return Promise.race([
+    Promise.resolve(promise).finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        logger.error(`[relay-checkin-plugin] ${label} 超时（${ms / 1000}s），已中断`)
+        reject(new Error(`${label}超时，请检查网络/代理后重试`))
+      }, ms)
+    })
+  ])
 }
 
 /**
@@ -164,6 +228,26 @@ export default class RelayCheckinApp extends plugin {
   }
 
   /**
+   * 加用户锁执行：同一用户的耗时操作串行，重复触发时提示而不是并发执行
+   */
+  async runLocked(label, fn) {
+    let r
+    try {
+      r = await withUserLock(this.e.user_id, label, fn)
+    } catch (err) {
+      // 未预见的异常（如落盘失败）也要给用户回执，否则表现为「发了指令没反应」
+      logger.error(`[relay-checkin-plugin] ${label} 执行异常:`, err)
+      await this.reply(`${label}出错了：${err?.message || err}`)
+      return false
+    }
+    if (!r.ok) {
+      await this.reply(`你的「${r.busy.label}」正在进行中（已 ${r.busy.seconds} 秒），请等它完成后再试`, true)
+      return false
+    }
+    return true
+  }
+
+  /**
    * 渲染失败时回退为文字
    */
   async replyImage(img, fallbackText) {
@@ -199,7 +283,12 @@ export default class RelayCheckinApp extends plugin {
    * @returns {Promise<{ok, msg?, account?, info?}>}
    */
   async verifyToken(site, token, siteUserId) {
-    const probe = await probeAccount(site.baseUrl, token, siteUserId)
+    let probe
+    try {
+      probe = await guardHang(probeAccount(site.baseUrl, token, siteUserId), '验证账号')
+    } catch (err) {
+      return { ok: false, msg: err.message }
+    }
     if (!probe.ok) return { ok: false, msg: probe.msg }
     return {
       ok: true,
@@ -225,7 +314,7 @@ export default class RelayCheckinApp extends plugin {
     const type = cookieTypeForHost(site.host)
     const account = { name: site.host, baseUrl: site.baseUrl, type, token, siteUserId, signPath: null, auto: true }
     try {
-      const info = await getAdapter(type).userInfo(account)
+      const info = await guardHang(getAdapter(type).userInfo(account), '验证账号')
       if (!info.ok) return { ok: false, msg: `${info.msg}（请检查 session 与用户ID）` }
       return { ok: true, account, info }
     } catch (err) {
@@ -280,12 +369,7 @@ export default class RelayCheckinApp extends plugin {
       promptMsgId: null,
       promptTimer: null
     }
-    pending.timer = setTimeout(async () => {
-      pendingBinds.delete(key)
-      await recallBindPrompt(pending)
-      await notifyBindPrivate(pending, `中转站 ${pending.host} 绑定超时，已取消，可重新发送添加指令`)
-      await notifyBindGroup(pending, `中转站 ${pending.host} 绑定超时，已取消`)
-    }, timeoutSec * 1000)
+    armBindTimeout(pending, timeoutSec)
     pendingBinds.set(key, pending)
 
     const need = kind === 'cookie'
@@ -335,13 +419,16 @@ export default class RelayCheckinApp extends plugin {
       return true
     }
 
-    await this.reply('正在验证账号，请稍候...')
-    const r = await this.verifyToken(site, args[1], args[2] || null)
-    if (!r.ok) {
-      await this.reply(`添加失败：${r.msg}`)
-      return true
-    }
-    await this.saveAccount(r.account, r.info)
+    // 加锁：入库会改动 accounts 数组，不能与正在进行的签到/删除交错
+    await this.runLocked('添加账号', async () => {
+      await this.reply('正在验证账号，请稍候...')
+      const r = await this.verifyToken(site, args[1], args[2] || null)
+      if (!r.ok) {
+        await this.reply(`添加失败：${r.msg}`)
+        return
+      }
+      await this.saveAccount(r.account, r.info)
+    })
     return true
   }
 
@@ -374,13 +461,15 @@ export default class RelayCheckinApp extends plugin {
       return true
     }
 
-    await this.reply('正在验证账号，请稍候...')
-    const r = await this.verifyCookie(site, args[1], args[2])
-    if (!r.ok) {
-      await this.reply(`添加失败：${r.msg}`)
-      return true
-    }
-    await this.saveAccount(r.account, r.info)
+    await this.runLocked('添加账号', async () => {
+      await this.reply('正在验证账号，请稍候...')
+      const r = await this.verifyCookie(site, args[1], args[2])
+      if (!r.ok) {
+        await this.reply(`添加失败：${r.msg}`)
+        return
+      }
+      await this.saveAccount(r.account, r.info)
+    })
     return true
   }
 
@@ -431,30 +520,54 @@ export default class RelayCheckinApp extends plugin {
       return true
     }
 
-    // 进入验证即消费会话，避免验证期间超时重复回执
-    clearPending(key)
     const site = { baseUrl: pending.baseUrl, host: pending.host }
 
-    await this.reply('正在验证账号，请稍候...')
-    const r = pending.kind === 'cookie'
-      ? await this.verifyCookie(site, parts[0], parts[1])
-      : await this.verifyToken(site, parts[0], parts[1] || null)
+    // 加锁：入库会改动 accounts 数组，不能与正在进行的签到/删除交错。
+    // 会话必须在拿到锁之后才消费——锁忙时保留会话，用户稍后重发凭据即可，
+    // 否则刚发来的凭据会被丢弃且要重走一遍添加流程
+    let locked
+    try {
+      locked = await withUserLock(this.e.user_id, '绑定账号', async () => {
+        // 进入验证即消费会话，避免验证期间超时重复回执
+        clearPending(key)
+        await this.reply('正在验证账号，请稍候...')
+        const r = pending.kind === 'cookie'
+          ? await this.verifyCookie(site, parts[0], parts[1])
+          : await this.verifyToken(site, parts[0], parts[1] || null)
 
-    if (!r.ok) {
-      await recallBindPrompt(pending)
-      await this.reply(`绑定失败：${r.msg}\n可重新发送添加指令再试`)
-      await notifyBindGroup(pending, `中转站 ${pending.host} 绑定失败：${r.msg}`)
+        if (!r.ok) {
+          await recallBindPrompt(pending)
+          await this.reply(`绑定失败：${r.msg}\n可重新发送添加指令再试`)
+          await notifyBindGroup(pending, `中转站 ${pending.host} 绑定失败：${r.msg}`)
+          return
+        }
+
+        const { entry, statusText, checkinRow, balance } = await this.saveAccount(r.account, r.info)
+        // 群里发起的绑定：把该群记入候选推送群（私聊补发凭据时事件里没有群号）
+        if (pending.groupId) {
+          rememberGroup(entry, pending.groupId)
+          persist()
+        }
+        await recallBindPrompt(pending)
+        await notifyBindGroup(pending, `中转站 ${accountLabel(r.account)} ${statusText}，余额 ${balance}，${checkinRow.statusText}`)
+      })
+    } catch (err) {
+      // 未预见的异常也要回执，否则表现为「发了凭据没反应」
+      logger.error('[relay-checkin-plugin] 绑定账号执行异常:', err)
+      await this.reply(`绑定出错了：${err?.message || err}\n可重新发送添加指令再试`)
       return true
     }
-
-    const { entry, statusText, checkinRow, balance } = await this.saveAccount(r.account, r.info)
-    // 群里发起的绑定：定时推送目标记为该群
-    if (pending.groupId) {
-      entry.groupId = pending.groupId
-      persist()
+    if (!locked.ok) {
+      // 会话原本的超时是从发起时起算，等待锁的这段时间要还给用户，
+      // 否则他按提示等完再发凭据时会话可能已过期
+      const timeoutSec = getConfig().bind.timeoutSec || 300
+      armBindTimeout(pending, timeoutSec)
+      const mins = Math.max(1, Math.round(timeoutSec / 60))
+      await this.reply(
+        `你的「${locked.busy.label}」正在进行中（已 ${locked.busy.seconds} 秒），本次凭据未保存。` +
+        `等它完成后在 ${mins} 分钟内再发一次凭据即可，站点已记住（无需重发添加指令）`
+      )
     }
-    await recallBindPrompt(pending)
-    await notifyBindGroup(pending, `中转站 ${accountLabel(r.account)} ${statusText}，余额 ${balance}，${checkinRow.statusText}`)
     return true
   }
 
@@ -471,8 +584,13 @@ export default class RelayCheckinApp extends plugin {
 
     let checkinRow
     try {
-      checkinRow = await checkinAccount(stored)
-      persist()
+      checkinRow = await guardHang(checkinAccount(stored), '签到')
+      // 缓存落盘失败不能让一次成功的签到被报成失败
+      try {
+        persist()
+      } catch (err) {
+        logger.error(`[relay-checkin-plugin] 状态缓存落盘失败: ${err?.message || err}`)
+      }
     } catch (err) {
       checkinRow = {
         name: accountLabel(stored), status: 'fail', statusText: '签到失败',
@@ -502,21 +620,28 @@ export default class RelayCheckinApp extends plugin {
       await this.reply('你还没有添加账号，发送 #中转帮助 查看用法')
       return true
     }
-    // 实时刷新余额（AnyRouter 等浏览器站耗时长，用缓存）；签到状态来自本插件签到记录
-    await refreshBalances(entry)
-    const img = await renderList(entry)
-    await this.replyImage(img, '列表渲染失败，请查看日志')
+    await this.runLocked('列表', async () => {
+      // 实时刷新余额（AnyRouter 等浏览器站耗时长，用缓存）；签到状态来自本插件签到记录
+      await refreshBalances(entry)
+      const img = await renderList(entry)
+      await this.replyImage(img, '列表渲染失败，请查看日志')
+    })
     return true
   }
 
+  /**
+   * 删除账号：与签到共用用户锁，避免签到遍历期间数组变动导致错位
+   */
   async remove() {
     const index = Number(/(\d+)/.exec(this.e.msg)[1])
-    const removed = removeAccount(this.e, index)
-    if (!removed) {
-      await this.reply(`删除失败：序号 ${index} 不存在，发送 #中转列表 查看`)
-    } else {
-      await this.reply(`已删除账号 [${index}] ${accountLabel(removed)}`)
-    }
+    await this.runLocked('删除账号', async () => {
+      const removed = removeAccount(this.e, index)
+      if (!removed) {
+        await this.reply(`删除失败：序号 ${index} 不存在，发送 #中转列表 查看`)
+      } else {
+        await this.reply(`已删除账号 [${index}] ${accountLabel(removed)}`)
+      }
+    })
     return true
   }
 
@@ -534,13 +659,16 @@ export default class RelayCheckinApp extends plugin {
       return true
     }
 
-    await this.reply('正在签到，请稍候...')
-    const results = await checkinEntry(entry, { index })
-    const img = await renderResult({
-      title: '中转站签到',
-      users: [{ nickname: entry.nickname, userId: entry.userId, accounts: results }]
+    await this.runLocked('签到', async () => {
+      const targets = index ? [entry.accounts[index - 1]] : entry.accounts
+      await this.reply(progressTip(targets))
+      const results = await checkinEntry(entry, { index })
+      const img = await renderResult({
+        title: '中转站签到',
+        users: [{ nickname: entry.nickname, userId: entry.userId, accounts: results }]
+      })
+      await this.replyImage(img, results.map(r => `${r.name}: ${r.statusText}${r.msg ? ` (${r.msg})` : ''}`).join('\n'))
     })
-    await this.replyImage(img, results.map(r => `${r.name}: ${r.statusText}${r.msg ? ` (${r.msg})` : ''}`).join('\n'))
     return true
   }
 
@@ -551,13 +679,15 @@ export default class RelayCheckinApp extends plugin {
       return true
     }
 
-    await this.reply('正在查询，请稍候...')
-    const results = await queryEntry(entry)
-    const img = await renderResult({
-      title: '中转站余额查询',
-      users: [{ nickname: entry.nickname, userId: entry.userId, accounts: results }]
+    await this.runLocked('余额查询', async () => {
+      await this.reply('正在查询，请稍候...')
+      const results = await queryEntry(entry)
+      const img = await renderResult({
+        title: '中转站余额查询',
+        users: [{ nickname: entry.nickname, userId: entry.userId, accounts: results }]
+      })
+      await this.replyImage(img, results.map(r => `${r.name}: 余额 ${r.balance}`).join('\n'))
     })
-    await this.replyImage(img, results.map(r => `${r.name}: 余额 ${r.balance}`).join('\n'))
     return true
   }
 
@@ -572,12 +702,15 @@ export default class RelayCheckinApp extends plugin {
     const index = match[2] ? Number(match[2]) : null
 
     if (index !== null) {
-      const acc = setAccountAuto(this.e, index, enable)
-      if (!acc) {
-        await this.reply(`序号 ${index} 不存在，发送 #中转列表 查看`)
-      } else {
-        await this.reply(`已${enable ? '开启' : '关闭'} [${index}] ${accountLabel(acc)} 的定时签到`)
-      }
+      // 按序号操作，与签到/删除共用用户锁避免错位
+      await this.runLocked('定时开关', async () => {
+        const acc = setAccountAuto(this.e, index, enable)
+        if (!acc) {
+          await this.reply(`序号 ${index} 不存在，发送 #中转列表 查看`)
+        } else {
+          await this.reply(`已${enable ? '开启' : '关闭'} [${index}] ${accountLabel(acc)} 的定时签到`)
+        }
+      })
       return true
     }
 

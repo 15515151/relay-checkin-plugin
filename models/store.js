@@ -97,8 +97,40 @@ export function ensureEntry(e) {
 function applyEvent(entry, e) {
   entry.nickname = e.sender?.card || e.sender?.nickname || entry.nickname || String(e.user_id)
   entry.selfId = String(e.self_id ?? entry.selfId)
-  // 群内使用时更新推送目标群；私聊使用不清空，保持推回最近的群
-  if (e.isGroup && e.group_id) entry.groupId = String(e.group_id)
+  // 群内使用时把该群记入候选列表；私聊使用不清空，保持推回用过的群
+  if (e.isGroup && e.group_id) rememberGroup(entry, e.group_id)
+  else normalizeGroups(entry)
+}
+
+// 记录的候选推送群上限（最近使用优先）
+const MAX_GROUPS = 5
+
+/**
+ * 兼容旧数据：只有 groupId 时补出 groupIds 列表
+ */
+function normalizeGroups(entry) {
+  if (!Array.isArray(entry.groupIds)) {
+    entry.groupIds = entry.groupId ? [String(entry.groupId)] : []
+  }
+}
+
+/**
+ * 把某群提到候选推送群列表首位（最近使用优先，去重、限长）。
+ * 记多个群是为了：用户最近用指令的群若未开启推送，还能推到他用过的其他已开启群
+ */
+export function rememberGroup(entry, groupId) {
+  normalizeGroups(entry)
+  const gid = String(groupId)
+  entry.groupIds = [gid, ...entry.groupIds.filter(g => g !== gid)].slice(0, MAX_GROUPS)
+  entry.groupId = gid // 保留旧字段语义：最近使用的群
+}
+
+/**
+ * 候选推送群列表（最近使用优先）
+ */
+export function groupCandidates(entry) {
+  if (Array.isArray(entry.groupIds) && entry.groupIds.length) return entry.groupIds
+  return entry.groupId ? [String(entry.groupId)] : []
 }
 
 /**

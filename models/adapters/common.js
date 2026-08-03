@@ -73,12 +73,13 @@ async function proxiedRequest(url, { method, headers, timeoutMs, proxyUrl }) {
 
 /**
  * 发起 JSON 请求（带超时与重试；命中代理配置的 https 站点走代理）
+ * @param {object} opts { method, headers, timeoutMs: 覆盖配置超时, maxRetry: 覆盖配置重试次数 }
  * @returns {Promise<{status: number, json: object|null}>}
  */
-export async function request(url, { method = 'GET', headers = {} } = {}) {
+export async function request(url, { method = 'GET', headers = {}, timeoutMs = null, maxRetry = null } = {}) {
   const cfg = getConfig()
-  const timeoutMs = (cfg.request.timeout || 15) * 1000
-  const maxRetry = cfg.request.retry ?? 1
+  const tMs = timeoutMs ?? (cfg.request.timeout || 15) * 1000
+  const retries = maxRetry ?? (cfg.request.retry ?? 1)
   const fullHeaders = {
     'User-Agent': cfg.request.userAgent,
     Accept: 'application/json',
@@ -87,17 +88,17 @@ export async function request(url, { method = 'GET', headers = {} } = {}) {
   const proxyUrl = url.startsWith('https:') ? proxyForHost(new URL(url).hostname) : null
 
   let lastErr = null
-  for (let attempt = 0; attempt <= maxRetry; attempt++) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
     if (proxyUrl) {
       try {
-        return await proxiedRequest(url, { method, headers: fullHeaders, timeoutMs, proxyUrl })
+        return await proxiedRequest(url, { method, headers: fullHeaders, timeoutMs: tMs, proxyUrl })
       } catch (err) {
         lastErr = err
         continue
       }
     }
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    const timer = setTimeout(() => controller.abort(), tMs)
     try {
       const res = await fetch(url, {
         method,

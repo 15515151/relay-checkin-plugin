@@ -42,6 +42,7 @@ export default {
    * 一次浏览器会话完成签到 + 用户信息查询（executor 优先调用）
    */
   async checkinWithInfo(account) {
+    logger.info(`[relay-checkin-plugin] anyrouter 开始浏览器签到会话: ${account.name}`)
     if (!getConfig().browser.enable) {
       return {
         checkin: { ok: false, already: false, msg: '浏览器方案未启用（browser.enable），无法过 WAF' },
@@ -71,15 +72,18 @@ export default {
   },
 
   async userInfo(account) {
-    // 先试纯 HTTP（个别镜像站无 WAF）；只有拿到成功响应才采信，
-    // 避免把 WAF 的 JSON 拦截响应误判为 session 失效
+    // 快速试一次纯 HTTP（个别镜像站无 WAF）：短超时不重试，避免长时间静默；
+    // 只有拿到成功响应才采信，避免把 WAF 的 JSON 拦截响应误判为 session 失效
     try {
       const { json } = await request(`${account.baseUrl}/api/user/self`, {
-        headers: this.buildHeaders(account)
+        headers: this.buildHeaders(account),
+        timeoutMs: 8000,
+        maxRetry: 0
       })
       if (json?.success) return parseUserInfo(json)
-    } catch {
-      // 网络失败继续走浏览器
+      logger.info('[relay-checkin-plugin] anyrouter 纯 HTTP 探测未通过（WAF 拦截），走浏览器方案')
+    } catch (err) {
+      logger.info(`[relay-checkin-plugin] anyrouter 纯 HTTP 探测失败（${err.message}），走浏览器方案`)
     }
     if (!getConfig().browser.enable) {
       return { ok: false, msg: '浏览器方案未启用（browser.enable），无法过 WAF' }

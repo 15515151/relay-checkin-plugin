@@ -31,7 +31,8 @@ const DEFAULT_CONFIG = {
     enable: true,
     cron: '0 10 8 * * *',
     jitterMinutes: 10,
-    accountDelay: [5, 15]
+    accountDelay: [5, 15],
+    concurrency: 3
   },
   push: {
     mode: 'group',
@@ -46,7 +47,9 @@ const DEFAULT_CONFIG = {
     enable: true,
     wafTimeoutSec: 25,
     turnstileTimeoutSec: 30,
-    idleCloseSec: 300
+    idleCloseSec: 300,
+    maxConcurrentPages: 2,
+    slotWaitSec: 120
   },
   bind: {
     timeoutSec: 300,
