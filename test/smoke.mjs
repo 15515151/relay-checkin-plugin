@@ -21,11 +21,16 @@ const hadData = fs.existsSync(DATA)
 const backup = path.join(ROOT, 'data_backup_smoke')
 if (hadData) fs.renameSync(DATA, backup)
 
+// 预置一份"旧版本"残缺配置：验证升级后新增项自动补齐、用户已改的值保留
+fs.mkdirSync(DATA, { recursive: true })
+fs.writeFileSync(path.join(DATA, 'config.yaml'), 'schedule:\n  cron: "0 0 9 * * *"\npush:\n  mode: private\n')
+
 try {
   // ---- config ----
   const { getConfig } = await import('../models/config.js')
   const cfg = getConfig()
-  assert.equal(cfg.push.mode, 'group')
+  assert.equal(cfg.schedule.cron, '0 0 9 * * *', '用户已改的值应保留')
+  assert.equal(cfg.push.mode, 'private', '用户已改的值应保留')
   assert.equal(cfg.push.usersPerImage, 5)
   assert.deepEqual(cfg.schedule.accountDelay, [5, 15])
   assert.equal(cfg.browser.enable, true)
@@ -34,7 +39,10 @@ try {
   assert.equal(cfg.bind.groupRecallSec, 60)
   assert.equal(cfg.proxy.url, '')
   assert.deepEqual(cfg.proxy.hosts, ['anyrouter'])
-  assert.ok(fs.existsSync(path.join(DATA, 'config.yaml')), 'config.yaml 应自动生成')
+  const cfgText = fs.readFileSync(path.join(DATA, 'config.yaml'), 'utf-8')
+  assert.ok(cfgText.includes('proxy:') && cfgText.includes('groupRecallSec'), '新增配置项应写回配置文件')
+  assert.ok(cfgText.includes('0 0 9 * * *') && cfgText.includes('mode: private'), '写回后用户值应保留')
+  assert.ok(cfgText.includes('# 代理设置'), '模板注释应保留')
   console.log('config OK')
 
   // ---- adapters/common ----

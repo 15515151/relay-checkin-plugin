@@ -67,7 +67,7 @@ AnyRouter 同理（`#中转添加cookie anyrouter.top <session值> <用户ID>`�
 
 ## 配置
 
-首次启动后编辑 `data/config.yaml`（由 `config_default/config.yaml` 生成）：
+首次启动后编辑 `data/config.yaml`（由 `config_default/config.yaml` 生成）。插件更新带来的新增配置项会在启动时自动补进该文件，已修改的值与注释都会保留：
 
 - `schedule.cron`：定时签到时间（修改后需重启）
 - `schedule.jitterMinutes`：触发后随机延迟分钟数
