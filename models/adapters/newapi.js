@@ -8,6 +8,7 @@ import { request, parseUserInfo, parseCheckinResult } from './common.js'
 export default {
   type: 'newapi',
   label: 'new-api',
+  checkinPath: '/api/user/checkin',
 
   buildHeaders(account) {
     const headers = {

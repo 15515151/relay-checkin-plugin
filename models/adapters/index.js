@@ -2,8 +2,9 @@ import newapi from './newapi.js'
 import veloera from './veloera.js'
 import generic from './generic.js'
 import agentrouter from './agentrouter.js'
+import anyrouter from './anyrouter.js'
 
-const adapters = { newapi, veloera, generic, agentrouter }
+const adapters = { newapi, veloera, generic, agentrouter, anyrouter }
 
 export function getAdapter(type) {
   return adapters[type] || newapi
@@ -11,9 +12,12 @@ export function getAdapter(type) {
 
 /**
  * Cookie 方式添加时按域名选择适配器
+ * AgentRouter 官方域名：agentrouter.org 及 *.air-outer.com（如 ps.air-outer.com）
  */
 export function cookieTypeForHost(host) {
-  return /agentrouter/i.test(host) ? 'agentrouter' : 'generic'
+  if (/agentrouter|air-outer/i.test(host)) return 'agentrouter'
+  if (/anyrouter/i.test(host)) return 'anyrouter'
+  return 'generic'
 }
 
 /**

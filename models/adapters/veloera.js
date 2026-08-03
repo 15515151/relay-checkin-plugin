@@ -9,6 +9,7 @@ import { request, parseUserInfo, parseCheckinResult } from './common.js'
 export default {
   type: 'veloera',
   label: 'Veloera',
+  checkinPath: '/api/user/check_in',
 
   buildHeaders(account) {
     return {

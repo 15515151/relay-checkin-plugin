@@ -1,5 +1,5 @@
 import { getConfig } from './config.js'
-import { allEntries } from './store.js'
+import { allEntries, isPushGroup } from './store.js'
 import { checkinEntry, sleep, randInt } from './executor.js'
 import { renderResult, renderResultPages } from './render.js'
 
@@ -26,7 +26,8 @@ export async function runScheduledCheckin() {
       await sleep(delayMs)
     }
 
-    const entries = allEntries().filter(en => en.autoCheckin && en.accounts.length > 0)
+    // 总开关打开且至少有一个账号开着单账号定时开关的用户才参与
+    const entries = allEntries().filter(en => en.autoCheckin && en.accounts.some(acc => acc.auto !== false))
     if (!entries.length) {
       logger.info('[relay-checkin-plugin] 无需要定时签到的账号')
       return
@@ -42,7 +43,7 @@ export async function runScheduledCheckin() {
     const done = []
     for (let i = 0; i < entries.length; i++) {
       if (i > 0) await sleep(randInt(delayRange[0], delayRange[1]) * 1000)
-      const results = await checkinEntry(entries[i], { delayRange })
+      const results = await checkinEntry(entries[i], { delayRange, autoOnly: true })
       done.push({ entry: entries[i], results })
     }
 
@@ -78,7 +79,8 @@ async function pushResults(done, cfg) {
     return
   }
 
-  // mode === 'group'：推送到用户最近使用的群（合并转发），仅私聊用过的用户私聊推送
+  // mode === 'group'：推送到用户最近使用的群（合并转发），仅私聊用过的用户私聊推送；
+  // 群推送需该群在白名单内（#中转开启群推送），且群内仍有已绑定用户
   const groups = new Map()
   for (const item of done) {
     if (item.entry.groupId) {
@@ -94,19 +96,40 @@ async function pushResults(done, cfg) {
   }
 
   for (const { selfId, groupId, items } of groups.values()) {
+    if (!isPushGroup(groupId)) {
+      logger.info(`[relay-checkin-plugin] 群 ${groupId} 未开启定时推送，跳过（群管理可发 #中转开启群推送）`)
+      continue
+    }
     try {
-      const users = items.map(toUserBlock)
+      const bot = getBot(selfId)
+      const group = bot.pickGroup(Number(groupId) || groupId)
+
+      // 过滤已退群的用户；群里已无任何绑定用户则不推送
+      let members = null
+      try {
+        members = await group.getMemberMap()
+      } catch {
+        // 成员列表取不到（协议端不支持/临时失败）时不做过滤，交给发送环节兜底
+      }
+      const present = members
+        ? items.filter(it => members.has(Number(it.entry.userId)) || members.has(String(it.entry.userId)))
+        : items
+      if (!present.length) {
+        logger.info(`[relay-checkin-plugin] 群 ${groupId} 内已无绑定用户，跳过推送`)
+        continue
+      }
+
+      const users = present.map(toUserBlock)
       // 每张图最多 usersPerImage 个用户，超出分页成多张图合并转发
       const images = await renderResultPages({ title: '中转站定时签到', users })
       if (!images.length) continue
-      const bot = getBot(selfId)
       const nodes = images.map(img => ({
         message: img,
         nickname: '中转站签到',
         // TRSS 多 bot 时全局 Bot.uin 是数组，转发节点头像直接用所属 bot 的 QQ
         user_id: Number(selfId) || selfId
       }))
-      await bot.pickGroup(Number(groupId) || groupId).sendMsg(await Bot.makeForwardMsg(nodes))
+      await group.sendMsg(await Bot.makeForwardMsg(nodes))
     } catch (err) {
       logger.error(`[relay-checkin-plugin] 群 ${groupId} 推送失败: ${err?.message || err}`)
     }
