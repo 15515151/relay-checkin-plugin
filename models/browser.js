@@ -164,7 +164,14 @@ async function getBrowser(pool, proxy) {
         '--disable-blink-features=AutomationControlled'
       ]
       if (proxy?.server) args.push(`--proxy-server=${proxy.server}`)
-      return await puppeteer.launch({ headless: 'new', args })
+      // protocolTimeout 给所有 CDP 调用兜底（setCookie/evaluate 等在浏览器无响应时
+      // 会永久挂起且不受 launch 的 timeout 约束）；timeout 管启动连接本身
+      return await puppeteer.launch({
+        headless: 'new',
+        args,
+        timeout: 60000,
+        protocolTimeout: 90000
+      })
     })().then(inst => {
       pool.instance = inst
       pool.launching = null
@@ -230,11 +237,14 @@ async function withPage(host, fn) {
     let page = null
     try {
       logger.info(`[relay-checkin-plugin] 浏览器方案启动: ${host}${proxy ? ` (代理 ${proxy.server})` : ' (直连)'}`)
-      const browser = await withTimeout(getBrowser(pool, proxy), 60000, '启动浏览器超时（检查 puppeteer 是否可用）')
+      const browser = await withTimeout(getBrowser(pool, proxy), 70000, '启动浏览器超时（检查 puppeteer 是否可用）')
       page = await newPageSafe(browser, 30000)
-      if (proxy?.auth) await page.authenticate(proxy.auth)
-      await page.setUserAgent(getConfig().request.userAgent)
-      await page.evaluateOnNewDocument(STEALTH_SCRIPT)
+      logger.info('[relay-checkin-plugin] 浏览器页面就绪，开始初始化')
+      // 以下都是本地 CDP 调用，正常都是毫秒级；浏览器无响应时必须超时而不是静默挂死
+      if (proxy?.auth) await withTimeout(page.authenticate(proxy.auth), 15000, '设置代理认证超时')
+      await withTimeout(page.setUserAgent(getConfig().request.userAgent), 15000, '设置 UA 超时（浏览器无响应）')
+      await withTimeout(page.evaluateOnNewDocument(STEALTH_SCRIPT), 15000, '注入初始化脚本超时（浏览器无响应）')
+      logger.info('[relay-checkin-plugin] 页面初始化完成')
       return await fn(page)
     } finally {
       // 关闭也可能挂起（挑战页忙循环等），必须带超时否则计数永久失衡
@@ -325,11 +335,16 @@ export async function anyrouterSession(account) {
   const cfg = getConfig()
   const host = new URL(account.baseUrl).hostname
   return await withPage(host, async page => {
-    await page.setCookie({ name: 'session', value: account.token, domain: host, path: '/' })
+    await withTimeout(
+      page.setCookie({ name: 'session', value: account.token, domain: host, path: '/' }),
+      15000, '注入 session cookie 超时（浏览器无响应）'
+    )
+    logger.info(`[relay-checkin-plugin] 正在打开 ${account.baseUrl}`)
     await withTimeout(
       page.goto(account.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }),
       40000, '打开站点页面超时（网络或代理不通）'
     )
+    logger.info('[relay-checkin-plugin] 站点页面已打开，等待 WAF 放行')
 
     if (!await waitApiReady(page, account.baseUrl, cfg.browser.wafTimeoutSec || 25)) {
       return { wafBlocked: true }
@@ -356,11 +371,16 @@ export async function anyrouterUserInfo(account) {
   const cfg = getConfig()
   const host = new URL(account.baseUrl).hostname
   return await withPage(host, async page => {
-    await page.setCookie({ name: 'session', value: account.token, domain: host, path: '/' })
+    await withTimeout(
+      page.setCookie({ name: 'session', value: account.token, domain: host, path: '/' }),
+      15000, '注入 session cookie 超时（浏览器无响应）'
+    )
+    logger.info(`[relay-checkin-plugin] 正在打开 ${account.baseUrl}`)
     await withTimeout(
       page.goto(account.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }),
       40000, '打开站点页面超时（网络或代理不通）'
     )
+    logger.info('[relay-checkin-plugin] 站点页面已打开，等待 WAF 放行')
 
     if (!await waitApiReady(page, account.baseUrl, cfg.browser.wafTimeoutSec || 25)) {
       return { wafBlocked: true }

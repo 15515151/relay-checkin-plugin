@@ -75,13 +75,14 @@ export default {
     // 快速试一次纯 HTTP（个别镜像站无 WAF）：短超时不重试，避免长时间静默；
     // 只有拿到成功响应才采信，避免把 WAF 的 JSON 拦截响应误判为 session 失效
     try {
-      const { json } = await request(`${account.baseUrl}/api/user/self`, {
+      const { status, json } = await request(`${account.baseUrl}/api/user/self`, {
         headers: this.buildHeaders(account),
         timeoutMs: 8000,
         maxRetry: 0
       })
       if (json?.success) return parseUserInfo(json)
-      logger.info('[relay-checkin-plugin] anyrouter 纯 HTTP 探测未通过（WAF 拦截），走浏览器方案')
+      // 状态码能区分：401/403=凭据问题，200 但非 JSON=WAF 拦截页，其它=站点异常
+      logger.info(`[relay-checkin-plugin] anyrouter 纯 HTTP 探测未通过 (HTTP ${status}${json ? `, message=${json.message || '无'}` : ', 非 JSON 响应'})，走浏览器方案`)
     } catch (err) {
       logger.info(`[relay-checkin-plugin] anyrouter 纯 HTTP 探测失败（${err.message}），走浏览器方案`)
     }
