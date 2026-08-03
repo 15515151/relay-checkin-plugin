@@ -9,7 +9,9 @@ schedule:
   # 触发后随机延迟 0~N 分钟再开始执行（避免整点并发特征），0 为不延迟
   jitterMinutes: 10
   # 相邻两个账号签到之间的随机间隔（秒），[最小, 最大]
-  accountDelay: [5, 15]
+  accountDelay: [1, 5]
+  # 同时处理的用户数（单用户内部仍逐账号串行）；人多时调大，服务器弱则调小，上限 10
+  concurrency: 3
 
 # 定时签到结果推送
 push:
@@ -26,22 +28,46 @@ request:
   # 单次请求超时（秒）
   timeout: 15
   # 网络错误重试次数
-  retry: 1
+  retry: 3
   userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 # 无头浏览器方案（AnyRouter 过阿里云 WAF、Turnstile 站点自动降级签到）
 browser:
   enable: true
-  # 等待 WAF 放行的最长时间（秒）
-  wafTimeoutSec: 25
+  # 等待 WAF 放行的最长时间（秒）；anyrouter 的阿里云 WAF 较慢，不够时可加大
+  wafTimeoutSec: 60
   # 等待 Turnstile 挑战完成的最长时间（秒）
   turnstileTimeoutSec: 30
   # 浏览器空闲多久后自动关闭（秒）
   idleCloseSec: 300
+  # 全局同时打开的浏览器页面上限（每页约数十 MB 内存），超出的任务排队；上限 10
+  maxConcurrentPages: 2
+  # 排队等待浏览器空闲的最长时间（秒），超时该账号本次判定失败；范围 30~600
+  # 手动指令的整体超时会自动取「本值 + 120 秒」，无需另行配置
+  slotWaitSec: 120
 
-# 只发 #中转添加 地址 发起绑定后，等待私聊补发凭据的超时时间（秒）
+# 只发 #中转添加 地址 发起绑定后的私聊补发流程
 bind:
+  # 等待私聊补发凭据的超时时间（秒）
   timeoutSec: 300
+  # 群内绑定提示/回执消息自动撤回秒数，防多人使用刷屏；0 = 不撤回
+  # 绑定出结果（成功/失败/超时）时提示消息会立即撤回，此处是未出结果时的兜底时间
+  # 注意：QQ 只允许撤回 2 分钟内自己发的消息，最大 120
+  groupRecallSec: 60
+
+# 代理设置（anyrouter.top 等站点国内网络无法直连时配置）
+proxy:
+  # 代理地址，支持 http 代理（如 Clash: http://127.0.0.1:7890），可带账密 http://user:pass@host:port
+  # 留空 = 不使用代理；无头浏览器方案同样走此代理
+  url: ""
+  # 需要走代理的站点域名关键字（按包含匹配）；留空数组 = 配置了代理后全部站点走代理
+  hosts:
+    - anyrouter
+  # 无头浏览器是否也显式走上面的代理地址。
+  # 若代理软件开启了 TUN / 系统代理（如 Clash Verge 的 TUN 模式），
+  # 浏览器再显式指定代理可能形成环路导致页面永远打不开——这种情况请设为 false，
+  # 让浏览器直连、由系统层透明转发（API 请求仍走上面的代理）
+  useForBrowser: true
 
 # 群聊中使用 #中转添加 后，尝试撤回用户消息（令牌敏感），需机器人有管理员权限
 recallAdd: true

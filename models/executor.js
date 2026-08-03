@@ -6,9 +6,29 @@ import { accountLabel, persist } from './store.js'
 
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
+/**
+ * 落盘失败（磁盘满、Windows 文件被占用等）只记日志：
+ * 签到结果本身已在内存，不能因缓存落盘失败让整轮任务中断
+ */
+function safePersist() {
+  try {
+    persist()
+  } catch (err) {
+    logger.error(`[relay-checkin-plugin] 状态缓存落盘失败: ${err?.message || err}`)
+  }
+}
+
 export const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min
 
 const STATUS_TEXT = { ok: '签到成功', already: '今日已签', fail: '签到失败' }
+
+/**
+ * 站点回复是否属于「需要人机验证」类拦截（应降级到浏览器方案重试）：
+ * 除 Turnstile 明示外，部分魔改站提示「缺少完整性标记 / 请刷新页面 / 验证失败」等
+ */
+function needsBrowser(msg) {
+  return /turnstile|完整性|刷新页面|人机|验证码|captcha|verif/i.test(String(msg || ''))
+}
 
 /**
  * Turnstile 站点浏览器降级签到：取 site key → 页面内过挑战 → 带 token 重调签到接口
@@ -22,7 +42,7 @@ async function turnstileFallback(account, adapter) {
     // 取不到 site key 走下方统一失败
   }
   if (!siteKey) {
-    return { ok: false, already: false, msg: '站点开启 Turnstile 但无法获取 site key' }
+    return { ok: false, already: false, msg: '站点要求人机验证但无法获取 site key，无法自动签到' }
   }
 
   const res = await turnstileCheckin(account, {
@@ -34,8 +54,8 @@ async function turnstileFallback(account, adapter) {
     return { ok: false, already: false, msg: 'Turnstile 挑战未通过（站点可能要求交互验证）' }
   }
   const parsed = parseCheckinResult(res.status, res.json)
-  if (!parsed.ok && /turnstile/i.test(parsed.msg)) {
-    parsed.msg = 'Turnstile 验证未通过，请稍后重试'
+  if (!parsed.ok && needsBrowser(parsed.msg)) {
+    parsed.msg = `${parsed.msg}（浏览器方案已重试，站点可能要求交互式验证）`
   }
   return parsed
 }
@@ -62,9 +82,9 @@ export async function checkinAccount(account) {
       skipInfoQuery = true
     } else {
       r = await adapter.checkin(account)
-      // 站点开启 Turnstile 且浏览器方案可用时，自动降级为浏览器签到
-      if (!r.ok && /turnstile/i.test(r.msg) && adapter.checkinPath && getConfig().browser.enable) {
-        logger.info(`[relay-checkin-plugin] ${account.name} 触发 Turnstile，尝试浏览器方案`)
+      // 站点要求人机验证且浏览器方案可用时，自动降级为浏览器签到
+      if (!r.ok && needsBrowser(r.msg) && adapter.checkinPath && getConfig().browser.enable) {
+        logger.info(`[relay-checkin-plugin] ${account.name} 需人机验证，尝试浏览器方案`)
         r = await turnstileFallback(account, adapter)
       }
     }
@@ -119,8 +139,39 @@ export async function checkinEntry(entry, { index = null, delayRange = null, aut
     }
     results.push(await checkinAccount(accounts[i]))
   }
-  persist()
+  safePersist()
   return results
+}
+
+/**
+ * 刷新条目内各账号的余额缓存（#中转列表 用）：
+ * 纯 HTTP 站实时查询；AnyRouter 等浏览器站太慢，跳过用缓存。
+ * 并发执行，单账号超时/失败保留旧缓存，不影响其他账号
+ */
+const BROWSER_TYPES = new Set(['anyrouter'])
+
+export async function refreshBalances(entry, { timeoutMs = 10000 } = {}) {
+  await Promise.allSettled(entry.accounts.map(async account => {
+    if (BROWSER_TYPES.has(account.type)) return
+    const adapter = getAdapter(account.type)
+    let timer = null
+    try {
+      // 超时后原 promise 仍会被本 race 接管（不会变成未处理拒绝），同时清掉定时器避免悬挂
+      const info = await Promise.race([
+        adapter.userInfo(account),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('刷新超时')), timeoutMs)
+        })
+      ])
+      if (info.ok) {
+        account.lastBalance = info.balanceText
+        if (info.username) account.username = info.username
+      }
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }))
+  safePersist()
 }
 
 /**
@@ -150,6 +201,6 @@ export async function queryEntry(entry) {
     }
     results.push(row)
   }
-  persist()
+  safePersist()
   return results
 }

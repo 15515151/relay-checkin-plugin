@@ -1,7 +1,8 @@
 import { getConfig } from './config.js'
-import { allEntries, isPushGroup } from './store.js'
+import { allEntries, isPushGroup, groupCandidates } from './store.js'
 import { checkinEntry, sleep, randInt } from './executor.js'
 import { renderResult, renderResultPages } from './render.js'
+import { withUserLock } from './lock.js'
 
 let running = false
 
@@ -39,13 +40,35 @@ export async function runScheduledCheckin() {
       ? cfg.schedule.accountDelay
       : [5, 15]
 
-    // 逐用户逐账号执行
+    // 多用户并发执行（上限由 schedule.concurrency 控制），单用户内部仍逐账号串行；
+    // 与手动指令共用用户锁：用户正在手动操作时跳过，避免同一账号被签两次
+    const concurrency = Math.max(1, Math.min(cfg.schedule.concurrency || 3, 10))
     const done = []
-    for (let i = 0; i < entries.length; i++) {
-      if (i > 0) await sleep(randInt(delayRange[0], delayRange[1]) * 1000)
-      const results = await checkinEntry(entries[i], { delayRange, autoOnly: true })
-      done.push({ entry: entries[i], results })
+    let cursor = 0
+    let skipped = 0
+
+    const worker = async () => {
+      while (cursor < entries.length) {
+        const entry = entries[cursor++]
+        // 单个用户失败（落盘异常、适配器异常等）不能拖垮整轮，否则已签完的用户全收不到推送
+        try {
+          // 用户间随机间隔，避免整批请求特征过于集中
+          await sleep(randInt(delayRange[0], delayRange[1]) * 1000)
+          const r = await withUserLock(entry.userId, '定时签到', () =>
+            checkinEntry(entry, { delayRange, autoOnly: true }))
+          if (!r.ok) {
+            skipped++
+            logger.info(`[relay-checkin-plugin] 用户 ${entry.userId} 正在手动操作（${r.busy.label}），本轮跳过`)
+            continue
+          }
+          done.push({ entry, results: r.result })
+        } catch (err) {
+          logger.error(`[relay-checkin-plugin] 用户 ${entry.userId} 定时签到异常: ${err?.message || err}`)
+        }
+      }
     }
+    await Promise.all(Array.from({ length: Math.min(concurrency, entries.length) }, worker))
+    if (skipped) logger.info(`[relay-checkin-plugin] 本轮跳过 ${skipped} 个正在手动操作的用户`)
 
     await pushResults(done, cfg)
     logger.info('[relay-checkin-plugin] 定时签到完成')
@@ -65,7 +88,18 @@ function getBot(selfId) {
 }
 
 /**
- * 按配置推送签到结果
+ * 该用户结果要推送到的所有群：他用过的群里凡是开启了推送的都推一份
+ * （签到本身仍只执行一次，这里只是把同一份结果分发到多个群）
+ */
+function pickPushGroups(entry) {
+  return groupCandidates(entry).filter(gid => isPushGroup(gid))
+}
+
+/**
+ * 按配置推送签到结果。
+ * group 模式：推送到该用户用过且已开启推送的每一个群；
+ * 一个群都没推成功（无已开启的群/已退群/发送失败）时私聊兜底，
+ * 保证签到执行了就一定尝试过通知，不会静默丢弃
  */
 async function pushResults(done, cfg) {
   const mode = cfg.push.mode || 'group'
@@ -79,32 +113,26 @@ async function pushResults(done, cfg) {
     return
   }
 
-  // mode === 'group'：推送到用户最近使用的群（合并转发），仅私聊用过的用户私聊推送；
-  // 群推送需该群在白名单内（#中转开启群推送），且群内仍有已绑定用户
+  // 同一个群内的多个用户合并成一次推送；同一用户出现在多个已开启的群里则各推一份
   const groups = new Map()
   for (const item of done) {
-    if (item.entry.groupId) {
-      const gk = `${item.entry.selfId}:${item.entry.groupId}`
+    for (const groupId of pickPushGroups(item.entry)) {
+      const gk = `${item.entry.selfId}:${groupId}`
       if (!groups.has(gk)) {
-        groups.set(gk, { selfId: item.entry.selfId, groupId: item.entry.groupId, items: [] })
+        groups.set(gk, { selfId: item.entry.selfId, groupId, items: [] })
       }
       groups.get(gk).items.push(item)
-    } else {
-      await pushPrivate(item)
-      await sleep(1500)
     }
   }
 
+  // 至少成功推送到一个群的用户，不再私聊兜底
+  const delivered = new Set()
   for (const { selfId, groupId, items } of groups.values()) {
-    if (!isPushGroup(groupId)) {
-      logger.info(`[relay-checkin-plugin] 群 ${groupId} 未开启定时推送，跳过（群管理可发 #中转开启群推送）`)
-      continue
-    }
     try {
       const bot = getBot(selfId)
       const group = bot.pickGroup(Number(groupId) || groupId)
 
-      // 过滤已退群的用户；群里已无任何绑定用户则不推送
+      // 过滤已退群的用户；群里已无绑定用户则整群跳过
       let members = null
       try {
         members = await group.getMemberMap()
@@ -129,11 +157,26 @@ async function pushResults(done, cfg) {
         // TRSS 多 bot 时全局 Bot.uin 是数组，转发节点头像直接用所属 bot 的 QQ
         user_id: Number(selfId) || selfId
       }))
-      await group.sendMsg(await Bot.makeForwardMsg(nodes))
+      // Miao-Yunzai（icqq）在群对象上构造合并转发；TRSS 用全局 Bot.makeForwardMsg
+      const forward = group.makeForwardMsg
+        ? await group.makeForwardMsg(nodes)
+        : await Bot.makeForwardMsg(nodes)
+      await group.sendMsg(forward)
+      for (const it of present) delivered.add(it.entry.userId)
     } catch (err) {
       logger.error(`[relay-checkin-plugin] 群 ${groupId} 推送失败: ${err?.message || err}`)
     }
     await sleep(2000)
+  }
+
+  // 私聊兜底：一个群都没推成功的用户（含只私聊用过插件的用户）
+  for (const item of done) {
+    if (delivered.has(item.entry.userId)) continue
+    if (groupCandidates(item.entry).length) {
+      logger.info(`[relay-checkin-plugin] 用户 ${item.entry.userId} 未能推送到任何群，改为私聊`)
+    }
+    await pushPrivate(item)
+    await sleep(1500)
   }
 }
 

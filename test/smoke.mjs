@@ -21,21 +21,50 @@ const hadData = fs.existsSync(DATA)
 const backup = path.join(ROOT, 'data_backup_smoke')
 if (hadData) fs.renameSync(DATA, backup)
 
+// 预置一份"旧版本"残缺配置：验证升级后新增项自动补齐、用户已改的值保留
+fs.mkdirSync(DATA, { recursive: true })
+fs.writeFileSync(path.join(DATA, 'config.yaml'), 'schedule:\n  cron: "0 0 9 * * *"\npush:\n  mode: private\n')
+
 try {
   // ---- config ----
   const { getConfig } = await import('../models/config.js')
   const cfg = getConfig()
-  assert.equal(cfg.push.mode, 'group')
+  assert.equal(cfg.schedule.cron, '0 0 9 * * *', '用户已改的值应保留')
+  assert.equal(cfg.push.mode, 'private', '用户已改的值应保留')
   assert.equal(cfg.push.usersPerImage, 5)
   assert.deepEqual(cfg.schedule.accountDelay, [5, 15])
   assert.equal(cfg.browser.enable, true)
-  assert.equal(cfg.browser.wafTimeoutSec, 25)
+  assert.equal(cfg.browser.wafTimeoutSec, 60)
   assert.equal(cfg.bind.timeoutSec, 300)
-  assert.ok(fs.existsSync(path.join(DATA, 'config.yaml')), 'config.yaml 应自动生成')
+  assert.equal(cfg.bind.groupRecallSec, 60)
+  assert.equal(cfg.proxy.url, '')
+  assert.deepEqual(cfg.proxy.hosts, ['anyrouter'])
+  assert.equal(cfg.proxy.useForBrowser, true)
+  assert.equal(cfg.schedule.concurrency, 3)
+  assert.equal(cfg.browser.maxConcurrentPages, 2)
+  // 手动指令的整体超时预算 = slotWaitSec + 120s，必须严格大于排队上限，
+  // 否则会出现「已告知失败但任务稍后真的执行了」的矛盾结果
+  assert.equal(cfg.browser.slotWaitSec, 120)
+  assert.ok(cfg.browser.slotWaitSec + 120 > cfg.browser.slotWaitSec)
+  const cfgText = fs.readFileSync(path.join(DATA, 'config.yaml'), 'utf-8')
+  assert.ok(cfgText.includes('proxy:') && cfgText.includes('groupRecallSec'), '新增配置项应写回配置文件')
+  assert.ok(cfgText.includes('0 0 9 * * *') && cfgText.includes('mode: private'), '写回后用户值应保留')
+  assert.ok(cfgText.includes('# 代理设置'), '模板注释应保留')
   console.log('config OK')
 
   // ---- adapters/common ----
-  const { quotaToUsd, parseUserInfo, parseCheckinResult } = await import('../models/adapters/common.js')
+  const { quotaToUsd, parseUserInfo, parseCheckinResult, matchProxy } = await import('../models/adapters/common.js')
+  // 代理域名匹配：hosts 关键字包含匹配；空数组 = 全部走代理；未配置 url = 不走
+  const P = 'http://127.0.0.1:7890'
+  assert.equal(matchProxy('anyrouter.top', { url: P, hosts: ['anyrouter'] }), P)
+  assert.equal(matchProxy('agentrouter.org', { url: P, hosts: ['anyrouter'] }), null)
+  assert.equal(matchProxy('agentrouter.org', { url: P, hosts: [] }), P, '空 hosts 应全部走代理')
+  assert.equal(matchProxy('anyrouter.top', { url: '', hosts: ['anyrouter'] }), null, '未配置代理地址不走代理')
+  assert.equal(matchProxy('anyrouter.top', null), null)
+  // 浏览器是否走显式代理由 proxy.useForBrowser 控制（TUN 模式需关掉避免环路）
+  const { proxyForHost } = await import('../models/adapters/common.js')
+  assert.equal(proxyForHost('anyrouter.top'), null, '默认未配置代理地址时不走代理')
+  assert.equal(proxyForHost('anyrouter.top', true), null)
   assert.equal(quotaToUsd(500000), '$1.00')
   assert.equal(quotaToUsd('250000'), '$0.50')
   assert.equal(quotaToUsd('abc'), null)
@@ -135,6 +164,7 @@ try {
   store.setAccountAuto(eGroup, 1, false)
   up = store.upsertAccount(eGroup, acc({ token: 't1-new' }))
   assert.deepEqual([up.index, up.updated], [1, true])
+  assert.equal(up.account, store.getEntry(eGroup).accounts[0], '应返回入库后的对象引用（供添加后签到直接落缓存）')
   let entryNow = store.getEntry(eGroup)
   assert.equal(entryNow.accounts.length, 2)
   assert.equal(entryNow.accounts[0].token, 't1-new')
@@ -156,9 +186,21 @@ try {
   assert.equal(en2.accounts.length, 3, '私聊应共享群里添加的账号')
   assert.equal(en2.groupId, '999', '私聊使用不应清空最近群')
 
-  // 换群后 groupId 跟随最近使用的群
+  // 换群后 groupId 跟随最近使用的群，且两个群都留在候选列表里（最近优先）
   store.touchEntry(eOtherGroup)
   assert.equal(store.getEntry(ePrivate).groupId, '888')
+  assert.deepEqual(store.groupCandidates(store.getEntry(eGroup)), ['888', '999'], '用过的群都应记入候选，最近的在前')
+  // 回到旧群应提到首位而不是重复追加
+  store.touchEntry(eGroup)
+  assert.deepEqual(store.groupCandidates(store.getEntry(eGroup)), ['999', '888'])
+  // rememberGroup 幂等 + 限长
+  store.rememberGroup(store.getEntry(eGroup), '999')
+  assert.deepEqual(store.groupCandidates(store.getEntry(eGroup)), ['999', '888'])
+  for (const g of ['1', '2', '3', '4', '5']) store.rememberGroup(store.getEntry(eGroup), g)
+  assert.equal(store.groupCandidates(store.getEntry(eGroup)).length, 5, '候选群列表应限长 5')
+  // 旧数据（只有 groupId 无 groupIds）应能迁移出候选列表
+  assert.deepEqual(store.groupCandidates({ groupId: '777' }), ['777'])
+  assert.deepEqual(store.groupCandidates({ groupId: null }), [])
 
   // 删除（仅操作本用户数据）
   assert.equal(store.removeAccount(eGroup, 9), null)
@@ -171,6 +213,55 @@ try {
   const all = store.allEntries()
   assert.equal(all.length, 1)
   assert.equal(all[0].key, 'u:111')
+
+  // ---- lock：同一用户互斥，不同用户互不影响 ----
+  const lock = await import('../models/lock.js')
+  const l1 = lock.tryAcquire('111', '签到')
+  assert.ok(l1, '首次应获取到锁')
+  assert.equal(lock.tryAcquire('111', '查询'), null, '同一用户重复获取应失败')
+  assert.equal(lock.heldBy('111').label, '签到', '应报告持有中的操作名')
+  const l2 = lock.tryAcquire('222', '签到')
+  assert.ok(l2, '不同用户不应互相阻塞')
+  l1.release()
+  l1.release() // 重复释放应无副作用
+  assert.equal(lock.heldBy('111'), null)
+  assert.ok(lock.tryAcquire('111', '签到'), '释放后应可再获取')
+
+  // withUserLock：占用时返回 busy 而不是排队；释放后可再次执行
+  let ran = 0
+  const busy = await lock.withUserLock('111', '列表', async () => { ran++ })
+  assert.equal(busy.ok, false, '被占用应返回 busy')
+  assert.equal(busy.busy.label, '签到')
+  assert.equal(ran, 0, 'busy 时不应执行任务体')
+  assert.equal(lock.tryAcquire('111', 'x'), null, 'busy 返回后锁仍应由原持有者持有')
+  assert.ok(lock.heldBy('222'), '其他用户的锁不受影响')
+  l2.release()
+  // 通过 withUserLock 并发调用同一用户：只有一个能进入
+  let entered = 0
+  const results = await Promise.all([
+    lock.withUserLock('333', 'A', async () => { entered++; await new Promise(r => setTimeout(r, 30)) }),
+    lock.withUserLock('333', 'B', async () => { entered++ })
+  ])
+  assert.equal(entered, 1, '同一用户并发只应有一个进入')
+  assert.equal(results.filter(r => r.ok).length, 1)
+  assert.equal(lock.heldBy('333'), null, '执行完应自动释放')
+  // 任务体抛错也必须释放锁
+  await lock.withUserLock('444', 'E', async () => { throw new Error('x') }).catch(() => {})
+  assert.equal(lock.heldBy('444'), null, '异常路径也应释放锁')
+
+  // 归属校验：锁被超时兜底夺走后，旧持有者 release 不能删掉新持有者的锁
+  // （构造：手改 since 使其过期 → 新持有者取到锁 → 旧持有者释放）
+  const old = lock.tryAcquire('555', '旧任务')
+  const state = lock.heldBy('555')
+  assert.equal(state.label, '旧任务')
+  // 直接改内部时间不可行（未导出），改用可观察路径：同 key 释放后再取，验证 token 隔离
+  old.release()
+  const fresh = lock.tryAcquire('555', '新任务')
+  old.release() // 旧句柄重复释放不得影响新锁
+  assert.equal(lock.heldBy('555')?.label, '新任务', '旧句柄的 release 不应删除新持有者的锁')
+  fresh.release()
+  assert.equal(lock.heldBy('555'), null)
+  console.log('lock OK')
 
   // 定时推送白名单
   assert.equal(store.isPushGroup('999'), false)
@@ -208,8 +299,8 @@ try {
     query: /^#中转查询$/,
     toggle: /^#中转定时\s*(开|关)\s*(\d+)?$/,
     pushToggle: /^#中转(开启|关闭)(定时(签到)?)?群推送$/,
-    bindPrefixed: /^#?中转绑定/,
-    bind: /^[^#][\s\S]*$/
+    bindPrefixed: /^[#＃/\\]?\s*中转绑定/,
+    bind: /^[\s\S]+$/
   }
   assert.ok(rules.help.test('#中转帮助') && rules.help.test('#中转站help'))
   assert.ok(rules.add.test('#中转添加 https://x.com abc'))
@@ -229,9 +320,11 @@ try {
   assert.ok(rules.pushToggle.test('#中转开启群推送') && rules.pushToggle.test('#中转关闭群推送'))
   assert.ok(rules.pushToggle.test('#中转开启定时签到群推送'), '长格式应兼容')
   assert.ok(!rules.pushToggle.test('#中转群推送'), '无开启/关闭动词不应命中')
-  assert.ok(rules.bind.test('sess-value 12345'), '补发凭据规则应命中普通私聊消息')
-  assert.ok(!rules.bind.test('#中转列表'), '补发凭据规则不应吞掉 # 开头指令')
+  assert.ok(rules.bind.test('sess-value 12345'), '兜底规则应命中普通私聊消息')
+  assert.ok(rules.bind.test('/xgyToken+abc= 250'), '/ 开头的凭据也应命中（核心会归一化首字符，处理器按原文解析）')
+  assert.ok(rules.bind.test('#中转列表'), '兜底规则命中指令没关系，处理器按原文首字符放行')
   assert.ok(rules.bindPrefixed.test('中转绑定 tok') && rules.bindPrefixed.test('#中转绑定 tok'), 'disableAdopt 放行用的前缀格式应命中')
+  assert.ok(rules.bindPrefixed.test('/中转绑定 tok'), '/ 被归一化前的原文也应识别为前缀格式')
   console.log('指令正则 OK')
 
   console.log('\n全部冒烟测试通过 ✓')

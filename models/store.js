@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { DATA_PATH } from './config.js'
+import { DATA_PATH, renameWithRetry } from './config.js'
 
 const STORE_PATH = path.join(DATA_PATH, 'accounts.json')
 const PUSH_GROUPS_PATH = path.join(DATA_PATH, 'push_groups.json')
@@ -44,7 +44,7 @@ function save() {
   if (!fs.existsSync(DATA_PATH)) fs.mkdirSync(DATA_PATH, { recursive: true })
   const tmp = STORE_PATH + '.tmp'
   fs.writeFileSync(tmp, JSON.stringify(storeCache, null, 2))
-  fs.renameSync(tmp, STORE_PATH)
+  renameWithRetry(tmp, STORE_PATH)
 }
 
 /**
@@ -97,14 +97,46 @@ export function ensureEntry(e) {
 function applyEvent(entry, e) {
   entry.nickname = e.sender?.card || e.sender?.nickname || entry.nickname || String(e.user_id)
   entry.selfId = String(e.self_id ?? entry.selfId)
-  // 群内使用时更新推送目标群；私聊使用不清空，保持推回最近的群
-  if (e.isGroup && e.group_id) entry.groupId = String(e.group_id)
+  // 群内使用时把该群记入候选列表；私聊使用不清空，保持推回用过的群
+  if (e.isGroup && e.group_id) rememberGroup(entry, e.group_id)
+  else normalizeGroups(entry)
+}
+
+// 记录的候选推送群上限（最近使用优先）
+const MAX_GROUPS = 5
+
+/**
+ * 兼容旧数据：只有 groupId 时补出 groupIds 列表
+ */
+function normalizeGroups(entry) {
+  if (!Array.isArray(entry.groupIds)) {
+    entry.groupIds = entry.groupId ? [String(entry.groupId)] : []
+  }
+}
+
+/**
+ * 把某群提到候选推送群列表首位（最近使用优先，去重、限长）。
+ * 记多个群是为了：用户最近用指令的群若未开启推送，还能推到他用过的其他已开启群
+ */
+export function rememberGroup(entry, groupId) {
+  normalizeGroups(entry)
+  const gid = String(groupId)
+  entry.groupIds = [gid, ...entry.groupIds.filter(g => g !== gid)].slice(0, MAX_GROUPS)
+  entry.groupId = gid // 保留旧字段语义：最近使用的群
+}
+
+/**
+ * 候选推送群列表（最近使用优先）
+ */
+export function groupCandidates(entry) {
+  if (Array.isArray(entry.groupIds) && entry.groupIds.length) return entry.groupIds
+  return entry.groupId ? [String(entry.groupId)] : []
 }
 
 /**
  * 添加或更新账号：同站点同站点用户ID（都缺ID时同令牌）视为同一账号更新凭据，
  * 否则作为新账号追加（同站多账号）；更新时保留 auto 偏好与运行时缓存
- * @returns {{entry: object, index: number, updated: boolean}}
+ * @returns {{entry: object, index: number, updated: boolean, account: object}} account 为入库后的对象引用
  */
 export function upsertAccount(e, account) {
   const entry = ensureEntry(e)
@@ -118,11 +150,11 @@ export function upsertAccount(e, account) {
     const keep = entry.accounts[idx]
     entry.accounts[idx] = { ...keep, ...account, auto: keep.auto !== false }
     save()
-    return { entry, index: idx + 1, updated: true }
+    return { entry, index: idx + 1, updated: true, account: entry.accounts[idx] }
   }
   entry.accounts.push(account)
   save()
-  return { entry, index: entry.accounts.length, updated: false }
+  return { entry, index: entry.accounts.length, updated: false, account }
 }
 
 /**
@@ -200,7 +232,7 @@ function savePushGroups() {
   if (!fs.existsSync(DATA_PATH)) fs.mkdirSync(DATA_PATH, { recursive: true })
   const tmp = PUSH_GROUPS_PATH + '.tmp'
   fs.writeFileSync(tmp, JSON.stringify(pushGroupsCache, null, 2))
-  fs.renameSync(tmp, PUSH_GROUPS_PATH)
+  renameWithRetry(tmp, PUSH_GROUPS_PATH)
 }
 
 /**
