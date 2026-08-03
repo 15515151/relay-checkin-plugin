@@ -42,15 +42,17 @@ async function getProxyAgent(proxyUrl) {
 
 /**
  * 经 http 代理请求 https 站点（node:https + proxy agent；不跟随重定向，与 fetch 路径语义一致）
+ * 用独立定时器兜底超时：options.timeout 依赖 socket 分配，代理 CONNECT 阶段挂起时不会触发
  */
 async function proxiedRequest(url, { method, headers, timeoutMs, proxyUrl }) {
   const agent = await getProxyAgent(proxyUrl)
   const { request: httpsRequest } = await import('node:https')
   return await new Promise((resolve, reject) => {
-    const req = httpsRequest(url, { method, headers, agent, timeout: timeoutMs }, res => {
+    const req = httpsRequest(url, { method, headers, agent }, res => {
       const chunks = []
       res.on('data', c => chunks.push(c))
       res.on('end', () => {
+        clearTimeout(timer)
         let json = null
         try {
           json = JSON.parse(Buffer.concat(chunks).toString('utf8'))
@@ -60,8 +62,11 @@ async function proxiedRequest(url, { method, headers, timeoutMs, proxyUrl }) {
         resolve({ status: res.statusCode, json })
       })
     })
-    req.on('timeout', () => req.destroy(new Error('代理请求超时')))
-    req.on('error', reject)
+    const timer = setTimeout(() => req.destroy(new Error('代理请求超时（代理隧道无响应）')), timeoutMs)
+    req.on('error', err => {
+      clearTimeout(timer)
+      reject(err)
+    })
     req.end()
   })
 }

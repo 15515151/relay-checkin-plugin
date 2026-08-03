@@ -153,6 +153,7 @@ try {
   store.setAccountAuto(eGroup, 1, false)
   up = store.upsertAccount(eGroup, acc({ token: 't1-new' }))
   assert.deepEqual([up.index, up.updated], [1, true])
+  assert.equal(up.account, store.getEntry(eGroup).accounts[0], '应返回入库后的对象引用（供添加后签到直接落缓存）')
   let entryNow = store.getEntry(eGroup)
   assert.equal(entryNow.accounts.length, 2)
   assert.equal(entryNow.accounts[0].token, 't1-new')

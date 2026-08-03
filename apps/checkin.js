@@ -1,7 +1,7 @@
 import { getConfig } from '../models/config.js'
 import { touchEntry, upsertAccount, removeAccount, setAuto, setAccountAuto, accountLabel, persist, setPushGroup } from '../models/store.js'
 import { probeAccount, normalizeBaseUrl, getAdapter, cookieTypeForHost } from '../models/adapters/index.js'
-import { checkinEntry, queryEntry } from '../models/executor.js'
+import { checkinEntry, checkinAccount, queryEntry, refreshBalances } from '../models/executor.js'
 import { renderResult, renderList, renderHelp } from '../models/render.js'
 import { runScheduledCheckin } from '../models/scheduler.js'
 
@@ -447,43 +447,53 @@ export default class RelayCheckinApp extends plugin {
       return true
     }
 
-    const { entry, statusText } = await this.saveAccount(r.account, r.info)
+    const { entry, statusText, checkinRow, balance } = await this.saveAccount(r.account, r.info)
     // 群里发起的绑定：定时推送目标记为该群
     if (pending.groupId) {
       entry.groupId = pending.groupId
       persist()
     }
     await recallBindPrompt(pending)
-    await notifyBindGroup(pending, `中转站 ${accountLabel(r.account)} ${statusText}，余额 ${r.info.balanceText}`)
+    await notifyBindGroup(pending, `中转站 ${accountLabel(r.account)} ${statusText}，余额 ${balance}，${checkinRow.statusText}`)
     return true
   }
 
   /**
-   * 保存账号（同站点同站点用户ID才更新凭据，否则新增）并回复结果图
+   * 保存账号（同站点同站点用户ID才更新凭据，否则新增），随后立即签到一次
+   * （已签会识别为今日已签，未签顺带签上，让列表的签到状态从添加起就准确），
+   * 并回复含添加与签到两条结果的图片
    */
   async saveAccount(account, info) {
     account.username = info.username || ''
     account.lastBalance = info.balanceText || '-'
-    const { entry, updated } = upsertAccount(this.e, account)
+    const { entry, updated, account: stored } = upsertAccount(this.e, account)
     const statusText = updated ? '已更新凭据' : '添加成功'
+
+    let checkinRow
+    try {
+      checkinRow = await checkinAccount(stored)
+      persist()
+    } catch (err) {
+      checkinRow = {
+        name: accountLabel(stored), status: 'fail', statusText: '签到失败',
+        award: '', balance: info.balanceText, msg: err.message
+      }
+    }
+    const balance = checkinRow.balance !== '-' ? checkinRow.balance : info.balanceText
 
     const img = await renderResult({
       title: '中转站账号',
       users: [{
         nickname: entry.nickname,
         userId: entry.userId,
-        accounts: [{
-          name: accountLabel(account),
-          status: 'ok',
-          statusText,
-          award: '',
-          balance: info.balanceText,
-          msg: ''
-        }]
+        accounts: [
+          { name: accountLabel(stored), status: 'ok', statusText, award: '', balance, msg: '' },
+          checkinRow
+        ]
       }]
     })
-    await this.replyImage(img, `${statusText}：${accountLabel(account)}，当前余额 ${info.balanceText}`)
-    return { entry, statusText }
+    await this.replyImage(img, `${statusText}：${accountLabel(stored)}，余额 ${balance}，${checkinRow.statusText}${checkinRow.msg ? `（${checkinRow.msg}）` : ''}`)
+    return { entry, statusText, checkinRow, balance }
   }
 
   async list() {
@@ -492,6 +502,8 @@ export default class RelayCheckinApp extends plugin {
       await this.reply('你还没有添加账号，发送 #中转帮助 查看用法')
       return true
     }
+    // 实时刷新余额（AnyRouter 等浏览器站耗时长，用缓存）；签到状态来自本插件签到记录
+    await refreshBalances(entry)
     const img = await renderList(entry)
     await this.replyImage(img, '列表渲染失败，请查看日志')
     return true

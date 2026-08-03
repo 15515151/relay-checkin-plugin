@@ -124,6 +124,29 @@ export async function checkinEntry(entry, { index = null, delayRange = null, aut
 }
 
 /**
+ * 刷新条目内各账号的余额缓存（#中转列表 用）：
+ * 纯 HTTP 站实时查询；AnyRouter 等浏览器站太慢，跳过用缓存。
+ * 并发执行，单账号超时/失败保留旧缓存，不影响其他账号
+ */
+const BROWSER_TYPES = new Set(['anyrouter'])
+
+export async function refreshBalances(entry, { timeoutMs = 10000 } = {}) {
+  await Promise.allSettled(entry.accounts.map(async account => {
+    if (BROWSER_TYPES.has(account.type)) return
+    const adapter = getAdapter(account.type)
+    const info = await Promise.race([
+      adapter.userInfo(account),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('刷新超时')), timeoutMs))
+    ])
+    if (info.ok) {
+      account.lastBalance = info.balanceText
+      if (info.username) account.username = info.username
+    }
+  }))
+  persist()
+}
+
+/**
  * 余额查询（不签到）
  * @returns {Promise<Array<{name, status, statusText, award, balance, msg}>>}
  */

@@ -134,14 +134,21 @@ async function withPage(host, fn) {
 
 /**
  * 在页面上下文内发起 fetch（自动携带页面 cookie，可附加请求头）
- * 页面导航中（WAF 挑战自动刷新）evaluate 会抛异常，统一吞掉返回 status 0 由调用方重试
+ * 页面导航中（WAF 挑战自动刷新）evaluate 会抛异常，统一吞掉返回 status 0 由调用方重试；
+ * 页内 fetch 带 AbortSignal 超时，避免代理隧道挂起时无限等待
  * @returns {Promise<{status: number, json: object|null}>}
  */
 async function pageFetch(page, url, { method = 'GET', headers = {} } = {}) {
+  const timeoutMs = (getConfig().request.timeout || 15) * 1000
   try {
-    return await page.evaluate(async ({ url, method, headers }) => {
+    return await page.evaluate(async ({ url, method, headers, timeoutMs }) => {
       try {
-        const res = await fetch(url, { method, headers, credentials: 'include' })
+        const res = await fetch(url, {
+          method,
+          headers,
+          credentials: 'include',
+          signal: AbortSignal.timeout(timeoutMs)
+        })
         let json = null
         try {
           json = await res.json()
@@ -152,7 +159,7 @@ async function pageFetch(page, url, { method = 'GET', headers = {} } = {}) {
       } catch (err) {
         return { status: 0, json: null, error: String(err) }
       }
-    }, { url, method, headers })
+    }, { url, method, headers, timeoutMs })
   } catch (err) {
     return { status: 0, json: null, error: String(err?.message || err) }
   }

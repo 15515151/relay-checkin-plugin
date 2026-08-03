@@ -104,7 +104,7 @@ function applyEvent(entry, e) {
 /**
  * 添加或更新账号：同站点同站点用户ID（都缺ID时同令牌）视为同一账号更新凭据，
  * 否则作为新账号追加（同站多账号）；更新时保留 auto 偏好与运行时缓存
- * @returns {{entry: object, index: number, updated: boolean}}
+ * @returns {{entry: object, index: number, updated: boolean, account: object}} account 为入库后的对象引用
  */
 export function upsertAccount(e, account) {
   const entry = ensureEntry(e)
@@ -118,11 +118,11 @@ export function upsertAccount(e, account) {
     const keep = entry.accounts[idx]
     entry.accounts[idx] = { ...keep, ...account, auto: keep.auto !== false }
     save()
-    return { entry, index: idx + 1, updated: true }
+    return { entry, index: idx + 1, updated: true, account: entry.accounts[idx] }
   }
   entry.accounts.push(account)
   save()
-  return { entry, index: entry.accounts.length, updated: false }
+  return { entry, index: entry.accounts.length, updated: false, account }
 }
 
 /**
