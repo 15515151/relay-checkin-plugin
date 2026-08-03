@@ -34,8 +34,8 @@ request:
 # 无头浏览器方案（AnyRouter 过阿里云 WAF、Turnstile 站点自动降级签到）
 browser:
   enable: true
-  # 等待 WAF 放行的最长时间（秒）
-  wafTimeoutSec: 25
+  # 等待 WAF 放行的最长时间（秒）；anyrouter 的阿里云 WAF 较慢，不够时可加大
+  wafTimeoutSec: 60
   # 等待 Turnstile 挑战完成的最长时间（秒）
   turnstileTimeoutSec: 30
   # 浏览器空闲多久后自动关闭（秒）

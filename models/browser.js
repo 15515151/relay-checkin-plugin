@@ -317,10 +317,10 @@ async function withPage(host, fn) {
  * 页内 fetch 带 AbortSignal 超时，避免代理隧道挂起时无限等待
  * @returns {Promise<{status: number, json: object|null}>}
  */
-async function pageFetch(page, url, { method = 'GET', headers = {} } = {}) {
-  const timeoutMs = (getConfig().request.timeout || 15) * 1000
+async function pageFetch(page, url, { method = 'GET', headers = {}, timeoutMs: override = null } = {}) {
+  const timeoutMs = override ?? (getConfig().request.timeout || 15) * 1000
   try {
-    return await page.evaluate(async ({ url, method, headers, timeoutMs }) => {
+    const evaluating = page.evaluate(async ({ url, method, headers, timeoutMs }) => {
       try {
         const res = await fetch(url, {
           method,
@@ -339,6 +339,9 @@ async function pageFetch(page, url, { method = 'GET', headers = {} } = {}) {
         return { status: 0, json: null, error: String(err) }
       }
     }, { url, method, headers, timeoutMs })
+    // evaluate 自身也可能不返回（挑战页导航中/渲染器卡住），外层再兜一层超时，
+    // 否则单轮探测就能吃掉整个 WAF 预算且不留任何日志
+    return await withTimeout(evaluating, timeoutMs + 5000, '页内请求无响应')
   } catch (err) {
     return { status: 0, json: null, error: String(err?.message || err) }
   }
@@ -363,22 +366,54 @@ async function pageFetchRetry(page, url, opts, tries = 3, delayMs = 1500) {
  * 放行后短暂等待，避开挑战通过瞬间的页面刷新
  */
 async function waitApiReady(page, baseUrl, timeoutSec) {
+  // 先等挑战页把 JS 跑完（阿里云 WAF 靠 JS 设 acw_sc__v2 后自刷新），
+  // 参考实现同样是「等页面 complete → 再取 WAF cookie」而非立即请求接口
+  try {
+    await withTimeout(
+      page.waitForFunction('document.readyState === "complete"', { timeout: 8000 }),
+      10000, 'readyState 等待超时'
+    )
+  } catch {
+    await new Promise(r => setTimeout(r, 3000))
+  }
+  await logPageState(page)
+
   const deadline = Date.now() + timeoutSec * 1000
   let rounds = 0
   let lastStatus = null
   while (Date.now() < deadline) {
     rounds++
-    const { status, json } = await pageFetch(page, `${baseUrl}/api/status`)
+    // 每轮用较短超时，保证在 WAF 总预算内能探测多次
+    const { status, json, error } = await pageFetch(page, `${baseUrl}/api/status`, { timeoutMs: 8000 })
     lastStatus = status
     if (json && (json.success !== undefined || json.data !== undefined)) {
       logger.info(`[relay-checkin-plugin] WAF 已放行（第 ${rounds} 次探测）`)
       await new Promise(r => setTimeout(r, 800))
       return true
     }
+    logger.info(`[relay-checkin-plugin] WAF 探测 #${rounds}: HTTP ${status}${json ? ' (JSON 无 success/data)' : ' (非 JSON)'}${error ? ` err=${error}` : ''}`)
     await new Promise(r => setTimeout(r, 1500))
   }
-  logger.warn(`[relay-checkin-plugin] WAF 等待超时：探测 ${rounds} 次，最后状态 HTTP ${lastStatus}`)
+  logger.warn(`[relay-checkin-plugin] WAF 等待超时：探测 ${rounds} 次，最后状态 HTTP ${lastStatus}（可调大 browser.wafTimeoutSec）`)
   return false
+}
+
+/**
+ * 打印当前页面状态：是否还停在 WAF 挑战页、拿到了哪些 WAF cookie
+ */
+async function logPageState(page) {
+  try {
+    const [url, title, cookies] = await Promise.all([
+      Promise.resolve(page.url()),
+      withTimeout(page.title(), 8000, '取标题超时').catch(() => '?'),
+      withTimeout(page.cookies(), 8000, '取 cookie 超时').catch(() => [])
+    ])
+    const names = cookies.map(c => c.name)
+    const waf = names.filter(n => /^acw_|^cdn_sec_tc$|^_c_WBKFRo$/i.test(n))
+    logger.info(`[relay-checkin-plugin] 页面状态: url=${url} title=${JSON.stringify(title)} WAFcookie=[${waf.join(', ') || '无'}] 全部cookie=[${names.join(', ') || '无'}]`)
+  } catch (err) {
+    logger.info(`[relay-checkin-plugin] 取页面状态失败: ${err?.message || err}`)
+  }
 }
 
 /**

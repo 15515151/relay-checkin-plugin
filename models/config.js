@@ -45,7 +45,7 @@ const DEFAULT_CONFIG = {
   },
   browser: {
     enable: true,
-    wafTimeoutSec: 25,
+    wafTimeoutSec: 60,
     turnstileTimeoutSec: 30,
     idleCloseSec: 300,
     maxConcurrentPages: 2,

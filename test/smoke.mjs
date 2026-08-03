@@ -34,7 +34,7 @@ try {
   assert.equal(cfg.push.usersPerImage, 5)
   assert.deepEqual(cfg.schedule.accountDelay, [5, 15])
   assert.equal(cfg.browser.enable, true)
-  assert.equal(cfg.browser.wafTimeoutSec, 25)
+  assert.equal(cfg.browser.wafTimeoutSec, 60)
   assert.equal(cfg.bind.timeoutSec, 300)
   assert.equal(cfg.bind.groupRecallSec, 60)
   assert.equal(cfg.proxy.url, '')
