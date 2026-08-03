@@ -1,12 +1,15 @@
 import { getConfig } from './config.js'
+import { proxyForHost } from './adapters/common.js'
 
 /**
  * 无头浏览器工具：用于过阿里云 WAF（AnyRouter 系）与 Cloudflare Turnstile 挑战。
  * puppeteer 惰性加载（复用 Yunzai 根目录依赖，缺失时仅浏览器功能不可用，不影响插件加载）；
  * 浏览器单例复用，空闲一段时间后自动关闭。
+ * 目标站点命中 proxy 配置时以 --proxy-server 启动（带账密代理经 page.authenticate 认证）。
  */
 
 let browserInstance = null
+let browserMode = null
 let idleTimer = null
 let activeTasks = 0
 
@@ -41,18 +44,48 @@ function isBrowserAlive() {
   return browserInstance.connected ?? browserInstance.isConnected?.() ?? false
 }
 
-async function getBrowser() {
-  if (isBrowserAlive()) return browserInstance
+/**
+ * 解析代理地址：chromium 的 --proxy-server 不支持带账密，账密拆出来走 page.authenticate
+ */
+function parseProxy(proxyUrl) {
+  if (!proxyUrl) return null
+  try {
+    const u = new URL(proxyUrl)
+    return {
+      server: `${u.protocol}//${u.host}`,
+      auth: (u.username || u.password)
+        ? { username: decodeURIComponent(u.username), password: decodeURIComponent(u.password) }
+        : null
+    }
+  } catch {
+    logger.warn(`[relay-checkin-plugin] 代理地址格式不正确，已忽略: ${proxyUrl}`)
+    return null
+  }
+}
+
+async function getBrowser(proxy) {
+  const mode = proxy?.server || 'direct'
+  if (isBrowserAlive()) {
+    if (browserMode === mode) return browserInstance
+    // 代理模式不同需重启浏览器；有其他任务在用时沿用现有实例，避免中断
+    if (activeTasks > 1) {
+      logger.warn(`[relay-checkin-plugin] 浏览器正被其他任务使用，本次沿用 ${browserMode} 模式`)
+      return browserInstance
+    }
+    const inst = browserInstance
+    browserInstance = null
+    await inst.close().catch(() => {})
+  }
   const puppeteer = await getPuppeteer()
-  browserInstance = await puppeteer.launch({
-    headless: 'new',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-blink-features=AutomationControlled'
-    ]
-  })
+  const args = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-blink-features=AutomationControlled'
+  ]
+  if (proxy?.server) args.push(`--proxy-server=${proxy.server}`)
+  browserInstance = await puppeteer.launch({ headless: 'new', args })
+  browserMode = mode
   return browserInstance
 }
 
@@ -75,8 +108,9 @@ function scheduleIdleClose() {
 
 /**
  * 打开一个已注入 stealth 的页面执行任务，自动关闭页面并调度浏览器空闲回收
+ * @param {string} host 目标站点 host（用于判断是否走代理）
  */
-async function withPage(fn) {
+async function withPage(host, fn) {
   if (idleTimer) {
     clearTimeout(idleTimer)
     idleTimer = null
@@ -84,8 +118,10 @@ async function withPage(fn) {
   activeTasks++
   let page = null
   try {
-    const browser = await getBrowser()
+    const proxy = parseProxy(proxyForHost(host))
+    const browser = await getBrowser(proxy)
     page = await browser.newPage()
+    if (proxy?.auth) await page.authenticate(proxy.auth)
     await page.setUserAgent(getConfig().request.userAgent)
     await page.evaluateOnNewDocument(STEALTH_SCRIPT)
     return await fn(page)
@@ -142,8 +178,8 @@ async function waitApiReady(page, baseUrl, timeoutSec) {
  */
 export async function anyrouterSession(account) {
   const cfg = getConfig()
-  return await withPage(async page => {
-    const host = new URL(account.baseUrl).hostname
+  const host = new URL(account.baseUrl).hostname
+  return await withPage(host, async page => {
     await page.setCookie({ name: 'session', value: account.token, domain: host, path: '/' })
     await page.goto(account.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
 
@@ -170,8 +206,8 @@ export async function anyrouterSession(account) {
  */
 export async function anyrouterUserInfo(account) {
   const cfg = getConfig()
-  return await withPage(async page => {
-    const host = new URL(account.baseUrl).hostname
+  const host = new URL(account.baseUrl).hostname
+  return await withPage(host, async page => {
     await page.setCookie({ name: 'session', value: account.token, domain: host, path: '/' })
     await page.goto(account.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
 
@@ -235,7 +271,7 @@ async function solveTurnstile(page, siteKey, timeoutSec) {
  */
 export async function turnstileCheckin(account, { checkinPath, headers, siteKey }) {
   const cfg = getConfig()
-  return await withPage(async page => {
+  return await withPage(new URL(account.baseUrl).hostname, async page => {
     await page.goto(account.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
 
     const token = await solveTurnstile(page, siteKey, cfg.browser.turnstileTimeoutSec || 30)

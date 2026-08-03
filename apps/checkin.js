@@ -22,17 +22,36 @@ function clearPending(userId) {
 }
 
 /**
- * 绑定结果回执到发起流程的群（引用原指令消息，只含非敏感信息）
+ * 群内绑定提示/回执的自动撤回秒数（防多人使用刷屏；QQ 限制只能撤回 2 分钟内自己的消息）
+ */
+function bindRecallSec() {
+  const sec = getConfig().bind.groupRecallSec ?? 60
+  return sec > 0 ? Math.min(sec, 120) : 0
+}
+
+/**
+ * 绑定结果回执到发起流程的群（引用原指令消息，只含非敏感信息，按配置自动撤回）
  */
 async function notifyBindGroup(pending, text) {
   if (!pending?.groupId) return
   try {
     const bot = Bot[pending.selfId] ?? Bot
-    await bot.pickGroup(Number(pending.groupId) || pending.groupId).sendMsg([
+    const group = bot.pickGroup(Number(pending.groupId) || pending.groupId)
+    const res = await group.sendMsg([
       segment.reply(pending.messageId),
       segment.at(Number(pending.userId) || pending.userId),
       ' ' + text
     ])
+    const sec = bindRecallSec()
+    if (sec > 0 && res?.message_id) {
+      setTimeout(async () => {
+        try {
+          await group.recallMsg(res.message_id)
+        } catch {
+          // 超过撤回时限等情况，忽略
+        }
+      }, sec * 1000)
+    }
   } catch (err) {
     logger.error(`[relay-checkin-plugin] 群 ${pending.groupId} 绑定回执失败: ${err?.message || err}`)
   }
@@ -196,7 +215,7 @@ export default class RelayCheckinApp extends plugin {
           '机器人已开启私聊禁用（disablePrivate），私聊补发凭据会被拦截，本次未发起绑定。可任选：\n' +
           '1) 请主人在 config/config/other.yaml 的 disableAdopt 中加入 中转 ，之后重新发起，私聊发送：中转绑定 凭据\n' +
           `2) 直接在本群发送完整指令${recallTip}：${fullCmd}`,
-          true
+          true, { recallMsg: bindRecallSec() }
         )
       } else {
         // 本条私聊指令能到达说明完整指令格式可被放行，单发的裸凭据则会被拦截
@@ -236,7 +255,7 @@ export default class RelayCheckinApp extends plugin {
     const sendAs = block ? `中转绑定 ${need}` : need
     const mins = Math.max(1, Math.round(timeoutSec / 60))
     if (this.e.isGroup) {
-      await this.reply(`已记录站点 ${pending.host}，请在 ${mins} 分钟内私聊我直接发送：${sendAs}。敏感信息不要发在群里，结果会回到本群提示`, true)
+      await this.reply(`已记录站点 ${pending.host}，请在 ${mins} 分钟内私聊我直接发送：${sendAs}。敏感信息不要发在群里，结果会回到本群提示`, true, { recallMsg: bindRecallSec() })
     } else {
       await this.reply(`已记录站点 ${pending.host}，请在 ${mins} 分钟内直接发送：${sendAs}`)
     }
@@ -331,7 +350,7 @@ export default class RelayCheckinApp extends plugin {
       // 带前缀说明是误发到群的凭据：尽量撤回并提醒；普通群聊消息放行
       if (prefixed) {
         await this.recallIfGroup()
-        await this.reply('凭据请私聊我发送，不要发在群里')
+        await this.reply('凭据请私聊我发送，不要发在群里', false, { recallMsg: bindRecallSec() })
         return true
       }
       return false

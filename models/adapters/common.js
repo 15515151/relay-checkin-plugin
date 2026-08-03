@@ -1,26 +1,97 @@
 import { getConfig } from '../config.js'
 
 /**
- * 发起 JSON 请求（带超时与重试）
+ * 按代理配置判断某 host 是否走代理，返回代理地址或 null（纯函数便于测试）
+ * hosts 为域名关键字（包含匹配）；空数组 = 配置了代理后全部走代理
+ */
+export function matchProxy(host, proxyCfg) {
+  if (!proxyCfg?.url) return null
+  const hosts = (Array.isArray(proxyCfg.hosts) ? proxyCfg.hosts : []).filter(Boolean)
+  if (!hosts.length) return proxyCfg.url
+  return hosts.some(h => String(host).includes(String(h))) ? proxyCfg.url : null
+}
+
+/**
+ * 当前配置下某 host 应使用的代理地址（无需代理返回 null）
+ */
+export function proxyForHost(host) {
+  return matchProxy(host, getConfig().proxy)
+}
+
+let proxyAgentCache = null
+
+/**
+ * 复用 Yunzai 根目录自带的 https-proxy-agent 构建代理 Agent（按代理地址缓存）
+ */
+async function getProxyAgent(proxyUrl) {
+  if (proxyAgentCache?.url === proxyUrl) return proxyAgentCache.agent
+  let HttpsProxyAgent
+  try {
+    ({ HttpsProxyAgent } = await import('https-proxy-agent'))
+  } catch {
+    throw new Error('未找到 https-proxy-agent 依赖（Yunzai 自带），代理不可用')
+  }
+  proxyAgentCache = { url: proxyUrl, agent: new HttpsProxyAgent(proxyUrl) }
+  return proxyAgentCache.agent
+}
+
+/**
+ * 经 http 代理请求 https 站点（node:https + proxy agent；不跟随重定向，与 fetch 路径语义一致）
+ */
+async function proxiedRequest(url, { method, headers, timeoutMs, proxyUrl }) {
+  const agent = await getProxyAgent(proxyUrl)
+  const { request: httpsRequest } = await import('node:https')
+  return await new Promise((resolve, reject) => {
+    const req = httpsRequest(url, { method, headers, agent, timeout: timeoutMs }, res => {
+      const chunks = []
+      res.on('data', c => chunks.push(c))
+      res.on('end', () => {
+        let json = null
+        try {
+          json = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        } catch {
+          // 非 JSON 响应
+        }
+        resolve({ status: res.statusCode, json })
+      })
+    })
+    req.on('timeout', () => req.destroy(new Error('代理请求超时')))
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+/**
+ * 发起 JSON 请求（带超时与重试；命中代理配置的 https 站点走代理）
  * @returns {Promise<{status: number, json: object|null}>}
  */
 export async function request(url, { method = 'GET', headers = {} } = {}) {
   const cfg = getConfig()
   const timeoutMs = (cfg.request.timeout || 15) * 1000
   const maxRetry = cfg.request.retry ?? 1
+  const fullHeaders = {
+    'User-Agent': cfg.request.userAgent,
+    Accept: 'application/json',
+    ...headers
+  }
+  const proxyUrl = url.startsWith('https:') ? proxyForHost(new URL(url).hostname) : null
 
   let lastErr = null
   for (let attempt = 0; attempt <= maxRetry; attempt++) {
+    if (proxyUrl) {
+      try {
+        return await proxiedRequest(url, { method, headers: fullHeaders, timeoutMs, proxyUrl })
+      } catch (err) {
+        lastErr = err
+        continue
+      }
+    }
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
       const res = await fetch(url, {
         method,
-        headers: {
-          'User-Agent': cfg.request.userAgent,
-          Accept: 'application/json',
-          ...headers
-        },
+        headers: fullHeaders,
         redirect: 'manual',
         signal: controller.signal
       })

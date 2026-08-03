@@ -33,7 +33,12 @@ const DEFAULT_CONFIG = {
     idleCloseSec: 300
   },
   bind: {
-    timeoutSec: 300
+    timeoutSec: 300,
+    groupRecallSec: 60
+  },
+  proxy: {
+    url: '',
+    hosts: ['anyrouter']
   },
   recallAdd: true
 }

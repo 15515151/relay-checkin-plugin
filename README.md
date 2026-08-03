@@ -76,12 +76,16 @@ AnyRouter 同理（`#中转添加cookie anyrouter.top <session值> <用户ID>`�
 - `push.usersPerImage`：群合并转发每张图最多展示的用户数（默认 5）
 - `browser.enable`：无头浏览器方案开关（AnyRouter 过 WAF、Turnstile 站点降级签到）
 - `bind.timeoutSec`：发起绑定后等待私聊补发凭据的超时秒数（默认 300）
+- `bind.groupRecallSec`：群内绑定提示/回执消息自动撤回秒数，防多人使用刷屏（默认 60，0 不撤回；QQ 限制最大 120）
+- `proxy.url`：代理地址（anyrouter.top 等国内无法直连的站点用），如 Clash 的 `http://127.0.0.1:7890`，支持 `http://user:pass@host:port`；留空不使用。无头浏览器方案同样走此代理
+- `proxy.hosts`：需要走代理的站点域名关键字（包含匹配），默认 `[anyrouter]`；留空数组则配置代理后全部站点走代理
 - `recallAdd`：群里发含令牌的添加指令后是否尝试撤回消息
 
 ## 已知限制
 
 - Turnstile 浏览器方案依赖 Cloudflare 对无头环境的评分，非交互式挑战通常可自动通过；要求点击验证的站点可能失败，会在结果中提示
 - AnyRouter 的 WAF 策略可能变化，若持续提示「WAF 未放行」可稍后重试或提 issue
+- anyrouter.top 国内网络无法直连（报「网络请求失败: fetch failed」即是），需在 `data/config.yaml` 配置 `proxy.url` 代理（复用 Yunzai 自带的 https-proxy-agent，无需额外安装）
 - Cookie 方式的 session 有效期约 1 个月，失效后需重新添加
 - 列表图中的余额与「今日已签」为本插件最近一次签到/查询的缓存，站点网页上的操作不会反映进来
 - 令牌明文存储于 `data/accounts.json`，请勿将该目录提交到公开仓库（已加入 .gitignore）

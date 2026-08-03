@@ -31,11 +31,21 @@ try {
   assert.equal(cfg.browser.enable, true)
   assert.equal(cfg.browser.wafTimeoutSec, 25)
   assert.equal(cfg.bind.timeoutSec, 300)
+  assert.equal(cfg.bind.groupRecallSec, 60)
+  assert.equal(cfg.proxy.url, '')
+  assert.deepEqual(cfg.proxy.hosts, ['anyrouter'])
   assert.ok(fs.existsSync(path.join(DATA, 'config.yaml')), 'config.yaml 应自动生成')
   console.log('config OK')
 
   // ---- adapters/common ----
-  const { quotaToUsd, parseUserInfo, parseCheckinResult } = await import('../models/adapters/common.js')
+  const { quotaToUsd, parseUserInfo, parseCheckinResult, matchProxy } = await import('../models/adapters/common.js')
+  // 代理域名匹配：hosts 关键字包含匹配；空数组 = 全部走代理；未配置 url = 不走
+  const P = 'http://127.0.0.1:7890'
+  assert.equal(matchProxy('anyrouter.top', { url: P, hosts: ['anyrouter'] }), P)
+  assert.equal(matchProxy('agentrouter.org', { url: P, hosts: ['anyrouter'] }), null)
+  assert.equal(matchProxy('agentrouter.org', { url: P, hosts: [] }), P, '空 hosts 应全部走代理')
+  assert.equal(matchProxy('anyrouter.top', { url: '', hosts: ['anyrouter'] }), null, '未配置代理地址不走代理')
+  assert.equal(matchProxy('anyrouter.top', null), null)
   assert.equal(quotaToUsd(500000), '$1.00')
   assert.equal(quotaToUsd('250000'), '$0.50')
   assert.equal(quotaToUsd('abc'), null)
