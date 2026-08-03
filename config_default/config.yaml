@@ -1,0 +1,32 @@
+# relay-checkin-plugin 配置文件
+# 修改保存后大部分配置即时生效；schedule.cron 修改后需重启 Yunzai 才生效
+
+# 定时签到
+schedule:
+  enable: true
+  # cron 表达式（秒 分 时 日 月 周），默认每天 08:10
+  cron: "0 10 8 * * *"
+  # 触发后随机延迟 0~N 分钟再开始执行（避免整点并发特征），0 为不延迟
+  jitterMinutes: 10
+  # 相邻两个账号签到之间的随机间隔（秒），[最小, 最大]
+  accountDelay: [5, 15]
+
+# 定时签到结果推送
+push:
+  # group   = 推送回账号所属群（合并转发形式，私聊添加的账号仍私聊推送）
+  # private = 只私聊本人
+  # off     = 不推送（仅记录日志）
+  mode: group
+  # 群合并转发时，每张图最多展示的用户数，超出自动分成多张图
+  usersPerImage: 5
+
+# 请求设置
+request:
+  # 单次请求超时（秒）
+  timeout: 15
+  # 网络错误重试次数
+  retry: 1
+  userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
+# 群聊中使用 #中转添加 后，尝试撤回用户消息（令牌敏感），需机器人有管理员权限
+recallAdd: true

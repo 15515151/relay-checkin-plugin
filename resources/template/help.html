@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 640px;
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    background: linear-gradient(160deg, #1b1f30 0%, #232a42 100%);
+    padding: 28px;
+    color: #e8eaf2;
+  }
+  .header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
+  .title {
+    font-size: 26px; font-weight: bold;
+    background: linear-gradient(90deg, #7ab8ff, #b48cff);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .time { font-size: 13px; color: #8a92ad; }
+  .section {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    padding: 16px 18px;
+    margin-top: 12px;
+  }
+  .section-title { font-size: 15px; font-weight: bold; color: #7ab8ff; margin-bottom: 10px; }
+  .cmd-row { display: flex; margin-top: 8px; }
+  .cmd {
+    font-size: 13px; color: #f5c542; white-space: nowrap;
+    background: rgba(0, 0, 0, 0.25); border-radius: 6px; padding: 4px 10px;
+    font-family: Consolas, monospace;
+  }
+  .desc { font-size: 13px; color: #b9bfd3; margin-left: 12px; align-self: center; }
+  .tip { font-size: 12px; color: #8a92ad; margin-top: 10px; line-height: 1.7; }
+  .footer { margin-top: 18px; text-align: center; font-size: 12px; color: #5b6379; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div class="title">中转站签到 · 帮助</div>
+    <div class="time">{{time}}</div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">账号管理</div>
+    <div class="cmd-row"><span class="cmd">#中转添加 地址 令牌</span><span class="desc">添加账号（自动识别站点类型）</span></div>
+    <div class="cmd-row"><span class="cmd">#中转添加 地址 令牌 用户ID</span><span class="desc">Veloera 站点需附加站点用户ID</span></div>
+    <div class="cmd-row"><span class="cmd">#中转添加cookie 地址 session值 用户ID</span><span class="desc">Cookie 方式（AgentRouter/旧版站点）</span></div>
+    <div class="cmd-row"><span class="cmd">#中转列表</span><span class="desc">查看我的账号</span></div>
+    <div class="cmd-row"><span class="cmd">#中转删除 序号</span><span class="desc">删除指定账号</span></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">签到与查询</div>
+    <div class="cmd-row"><span class="cmd">#中转签到</span><span class="desc">立即签到全部账号</span></div>
+    <div class="cmd-row"><span class="cmd">#中转签到 序号</span><span class="desc">签到指定账号</span></div>
+    <div class="cmd-row"><span class="cmd">#中转查询</span><span class="desc">查询各账号余额</span></div>
+    <div class="cmd-row"><span class="cmd">#中转定时 开/关</span><span class="desc">开关每日自动签到</span></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">说明</div>
+    <div class="tip">
+      · 令牌为站点「个人设置 → 系统访问令牌」生成的 token，建议私聊添加，群里添加会尝试撤回消息<br>
+      · 数据按用户隔离：同一 QQ 在任意群/私聊共享账号，定时结果推送到最近使用的群<br>
+      · AgentRouter 用 Cookie 方式添加：F12 复制 session 值与用户ID（自动识别，访问即续期保活）<br>
+      · 支持 new-api / Veloera 及同源魔改站；开启 Turnstile 人机验证的站点无法自动签到
+    </div>
+  </div>
+
+  <div class="footer">relay-checkin-plugin · TRSS-Yunzai</div>
+</body>
+</html>

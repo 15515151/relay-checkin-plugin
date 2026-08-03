@@ -1,0 +1,7 @@
+{
+  "name": "relay-checkin-plugin",
+  "version": "1.0.0",
+  "description": "中转站（new-api/Veloera 系）自动签到插件，适用于 TRSS-Yunzai + OneBot v11",
+  "author": "",
+  "type": "module"
+}
