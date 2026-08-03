@@ -159,14 +159,31 @@ async function pageFetch(page, url, { method = 'GET', headers = {} } = {}) {
 }
 
 /**
+ * 带重试的页内请求：WAF 挑战自刷新会中断页内 fetch（status 0），间隔重试几次
+ */
+async function pageFetchRetry(page, url, opts, tries = 3, delayMs = 1500) {
+  let res = null
+  for (let i = 0; i < tries; i++) {
+    if (i > 0) await new Promise(r => setTimeout(r, delayMs))
+    res = await pageFetch(page, url, opts)
+    if (res.status !== 0) return res
+  }
+  return res
+}
+
+/**
  * 等待站点 API 可访问（WAF 放行标志）：页内请求 /api/status 返回有效 JSON
- * 且包含 success 或 data 字段（排除 WAF 拦截的 JSON 响应）
+ * 且包含 success 或 data 字段（排除 WAF 拦截的 JSON 响应）；
+ * 放行后短暂等待，避开挑战通过瞬间的页面刷新
  */
 async function waitApiReady(page, baseUrl, timeoutSec) {
   const deadline = Date.now() + timeoutSec * 1000
   while (Date.now() < deadline) {
     const { json } = await pageFetch(page, `${baseUrl}/api/status`)
-    if (json && (json.success !== undefined || json.data !== undefined)) return true
+    if (json && (json.success !== undefined || json.data !== undefined)) {
+      await new Promise(r => setTimeout(r, 800))
+      return true
+    }
     await new Promise(r => setTimeout(r, 1500))
   }
   return false
@@ -192,11 +209,11 @@ export async function anyrouterSession(account) {
       'X-Requested-With': 'XMLHttpRequest',
       'Content-Type': 'application/json'
     }
-    const checkin = await pageFetch(page, `${account.baseUrl}${account.signPath || '/api/user/sign_in'}`, {
+    const checkin = await pageFetchRetry(page, `${account.baseUrl}${account.signPath || '/api/user/sign_in'}`, {
       method: 'POST',
       headers
     })
-    const self = await pageFetch(page, `${account.baseUrl}/api/user/self`, { headers })
+    const self = await pageFetchRetry(page, `${account.baseUrl}/api/user/self`, { headers })
     return { checkin, self }
   })
 }
@@ -214,7 +231,7 @@ export async function anyrouterUserInfo(account) {
     if (!await waitApiReady(page, account.baseUrl, cfg.browser.wafTimeoutSec || 25)) {
       return { wafBlocked: true }
     }
-    const self = await pageFetch(page, `${account.baseUrl}/api/user/self`, {
+    const self = await pageFetchRetry(page, `${account.baseUrl}/api/user/self`, {
       headers: {
         'New-Api-User': String(account.siteUserId ?? ''),
         'X-Requested-With': 'XMLHttpRequest'

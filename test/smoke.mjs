@@ -226,8 +226,8 @@ try {
     query: /^#中转查询$/,
     toggle: /^#中转定时\s*(开|关)\s*(\d+)?$/,
     pushToggle: /^#中转(开启|关闭)(定时(签到)?)?群推送$/,
-    bindPrefixed: /^#?中转绑定/,
-    bind: /^[^#][\s\S]*$/
+    bindPrefixed: /^[#＃/\\]?\s*中转绑定/,
+    bind: /^[\s\S]+$/
   }
   assert.ok(rules.help.test('#中转帮助') && rules.help.test('#中转站help'))
   assert.ok(rules.add.test('#中转添加 https://x.com abc'))
@@ -247,9 +247,11 @@ try {
   assert.ok(rules.pushToggle.test('#中转开启群推送') && rules.pushToggle.test('#中转关闭群推送'))
   assert.ok(rules.pushToggle.test('#中转开启定时签到群推送'), '长格式应兼容')
   assert.ok(!rules.pushToggle.test('#中转群推送'), '无开启/关闭动词不应命中')
-  assert.ok(rules.bind.test('sess-value 12345'), '补发凭据规则应命中普通私聊消息')
-  assert.ok(!rules.bind.test('#中转列表'), '补发凭据规则不应吞掉 # 开头指令')
+  assert.ok(rules.bind.test('sess-value 12345'), '兜底规则应命中普通私聊消息')
+  assert.ok(rules.bind.test('/xgyToken+abc= 250'), '/ 开头的凭据也应命中（核心会归一化首字符，处理器按原文解析）')
+  assert.ok(rules.bind.test('#中转列表'), '兜底规则命中指令没关系，处理器按原文首字符放行')
   assert.ok(rules.bindPrefixed.test('中转绑定 tok') && rules.bindPrefixed.test('#中转绑定 tok'), 'disableAdopt 放行用的前缀格式应命中')
+  assert.ok(rules.bindPrefixed.test('/中转绑定 tok'), '/ 被归一化前的原文也应识别为前缀格式')
   console.log('指令正则 OK')
 
   console.log('\n全部冒烟测试通过 ✓')

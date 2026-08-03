@@ -7,8 +7,10 @@ import { runScheduledCheckin } from '../models/scheduler.js'
 
 /**
  * 等待私聊补发凭据的绑定会话（key: QQ号字符串）
- * { kind: 'token'|'cookie', baseUrl, host, userId, selfId, groupId, messageId, timer }
- * groupId/messageId 记录发起流程的群与指令消息，绑定结束后引用该消息回执结果
+ * { kind: 'token'|'cookie', baseUrl, host, userId, selfId, groupId, messageId,
+ *   timer, promptMsgId, promptTimer }
+ * groupId/messageId 记录发起流程的群与指令消息，绑定结束后引用该消息回执结果；
+ * promptMsgId 为群内「请私聊发送凭据」提示消息，绑定终态时立即撤回，否则到时撤回
  */
 const pendingBinds = new Map()
 
@@ -16,9 +18,42 @@ function clearPending(userId) {
   const pending = pendingBinds.get(String(userId))
   if (pending) {
     clearTimeout(pending.timer)
+    if (pending.promptTimer) clearTimeout(pending.promptTimer)
     pendingBinds.delete(String(userId))
   }
   return pending
+}
+
+/**
+ * 撤回群内的绑定提示消息（终态立即调用；定时器到期兜底调用，重复调用无副作用）
+ */
+async function recallBindPrompt(pending) {
+  if (!pending?.promptMsgId || !pending.groupId) return
+  const msgId = pending.promptMsgId
+  pending.promptMsgId = null
+  if (pending.promptTimer) {
+    clearTimeout(pending.promptTimer)
+    pending.promptTimer = null
+  }
+  try {
+    const bot = Bot[pending.selfId] ?? Bot
+    await bot.pickGroup(Number(pending.groupId) || pending.groupId).recallMsg(msgId)
+  } catch {
+    // 已被撤回或超过撤回时限，忽略
+  }
+}
+
+/**
+ * 取消息的原始文本：Yunzai 核心会把 e.msg 开头的 / ＃ 井 \ * 等字符归一化，
+ * 以这些字符开头的凭据（如 base64 令牌以 / 开头）会被改坏，
+ * 解析凭据一律走原始消息段
+ */
+function rawText(e) {
+  if (Array.isArray(e.message)) {
+    const t = e.message.filter(s => s.type === 'text').map(s => s.text ?? '').join('').trim()
+    if (t) return t
+  }
+  return String(e.raw_message ?? e.msg ?? '').trim()
 }
 
 /**
@@ -102,9 +137,9 @@ export default class RelayCheckinApp extends plugin {
         { reg: '^#中转查询$', fnc: 'query' },
         { reg: '^#中转定时\\s*(开|关)\\s*(\\d+)?$', fnc: 'toggleAuto' },
         { reg: '^#中转(开启|关闭)(定时(签到)?)?群推送$', fnc: 'togglePushGroup' },
-        // 私聊补发凭据：带「中转绑定」前缀（配合 disableAdopt 放行）或任意非指令消息
-        { reg: '^#?中转绑定', fnc: 'bindCredentials', log: false },
-        { reg: '^[^#][\\s\\S]*$', fnc: 'bindCredentials', log: false }
+        // 私聊补发凭据兜底：命中任意消息，处理器按原始文本与绑定会话判断是否消费
+        // （不能按首字符过滤：/ 开头的令牌会被核心归一化，规则层看不到原字符）
+        { reg: '^[\\s\\S]+$', fnc: 'bindCredentials', log: false }
       ]
     })
 
@@ -228,7 +263,9 @@ export default class RelayCheckinApp extends plugin {
     }
 
     const key = String(this.e.user_id)
-    clearPending(key)
+    // 重新发起时撤掉上一次尚未处理的提示
+    const stale = clearPending(key)
+    if (stale) await recallBindPrompt(stale)
 
     const timeoutSec = getConfig().bind.timeoutSec || 300
     const pending = {
@@ -239,10 +276,13 @@ export default class RelayCheckinApp extends plugin {
       selfId: String(this.e.self_id ?? Bot.uin),
       groupId: this.e.isGroup ? String(this.e.group_id) : null,
       messageId: this.e.message_id,
-      timer: null
+      timer: null,
+      promptMsgId: null,
+      promptTimer: null
     }
     pending.timer = setTimeout(async () => {
       pendingBinds.delete(key)
+      await recallBindPrompt(pending)
       await notifyBindPrivate(pending, `中转站 ${pending.host} 绑定超时，已取消，可重新发送添加指令`)
       await notifyBindGroup(pending, `中转站 ${pending.host} 绑定超时，已取消`)
     }, timeoutSec * 1000)
@@ -255,7 +295,13 @@ export default class RelayCheckinApp extends plugin {
     const sendAs = block ? `中转绑定 ${need}` : need
     const mins = Math.max(1, Math.round(timeoutSec / 60))
     if (this.e.isGroup) {
-      await this.reply(`已记录站点 ${pending.host}，请在 ${mins} 分钟内私聊我直接发送：${sendAs}。敏感信息不要发在群里，结果会回到本群提示`, true, { recallMsg: bindRecallSec() })
+      // 提示消息由插件自己管理撤回：绑定出结果立即撤，否则到 groupRecallSec 兜底撤
+      const res = await this.reply(`已记录站点 ${pending.host}，请在 ${mins} 分钟内私聊我直接发送：${sendAs}。敏感信息不要发在群里，结果会回到本群提示`, true)
+      pending.promptMsgId = res?.message_id ?? null
+      const sec = bindRecallSec()
+      if (sec > 0 && pending.promptMsgId) {
+        pending.promptTimer = setTimeout(() => recallBindPrompt(pending), sec * 1000)
+      }
     } else {
       await this.reply(`已记录站点 ${pending.host}，请在 ${mins} 分钟内直接发送：${sendAs}`)
     }
@@ -340,11 +386,13 @@ export default class RelayCheckinApp extends plugin {
 
   /**
    * 私聊补发凭据：命中绑定会话时完成校验入库，并回执到发起的群。
-   * 支持「中转绑定 凭据」前缀格式（配合 disablePrivate 的 disableAdopt 通行字符串放行）
+   * 支持「中转绑定 凭据」前缀格式（配合 disablePrivate 的 disableAdopt 通行字符串放行）；
+   * 凭据从原始消息文本解析，避免开头的 / # 等字符被核心归一化改坏
    */
   async bindCredentials() {
-    const raw = String(this.e.msg || '').trim()
-    const prefixed = /^#?中转绑定/.test(raw)
+    const raw = rawText(this.e)
+    if (!raw) return false
+    const prefixed = /^[#＃/\\]?\s*中转绑定/.test(raw)
 
     if (this.e.isGroup) {
       // 带前缀说明是误发到群的凭据：尽量撤回并提醒；普通群聊消息放行
@@ -365,8 +413,10 @@ export default class RelayCheckinApp extends plugin {
       }
       return false
     }
+    // 原文确实以 # 开头的是指令，放行给其他插件；凭据不会以 # 开头
+    if (!prefixed && /^[#＃]/.test(raw)) return false
 
-    const parts = raw.replace(/^#?中转绑定\s*/, '').split(/\s+/).filter(Boolean)
+    const parts = raw.replace(/^[#＃/\\]?\s*中转绑定\s*/, '').split(/\s+/).filter(Boolean)
     if (!parts.length) {
       if (prefixed) {
         await this.reply('请在 中转绑定 后附上凭据，例如：中转绑定 令牌')
@@ -391,6 +441,7 @@ export default class RelayCheckinApp extends plugin {
       : await this.verifyToken(site, parts[0], parts[1] || null)
 
     if (!r.ok) {
+      await recallBindPrompt(pending)
       await this.reply(`绑定失败：${r.msg}\n可重新发送添加指令再试`)
       await notifyBindGroup(pending, `中转站 ${pending.host} 绑定失败：${r.msg}`)
       return true
@@ -402,6 +453,7 @@ export default class RelayCheckinApp extends plugin {
       entry.groupId = pending.groupId
       persist()
     }
+    await recallBindPrompt(pending)
     await notifyBindGroup(pending, `中转站 ${accountLabel(r.account)} ${statusText}，余额 ${r.info.balanceText}`)
     return true
   }

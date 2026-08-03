@@ -5,6 +5,20 @@ import { getConfig } from '../config.js'
 const WAF_MSG = 'WAF 未放行（浏览器等待超时），请稍后重试'
 
 /**
+ * 解析浏览器页内 /api/user/self 结果，失败时补充状态码便于定位
+ * （status 0 = 页内请求被 WAF 刷新中断；非 JSON = 可能被 WAF 拦截）
+ */
+function parseSelfWithDiag(self) {
+  const info = parseUserInfo(self?.json)
+  if (!info.ok && self && self.json == null) {
+    info.msg = self.status === 0
+      ? '页面内请求被站点刷新中断，请稍后重试'
+      : `用户信息接口未返回有效数据 (HTTP ${self.status})，可能被 WAF 拦截`
+  }
+  return info
+}
+
+/**
  * AnyRouter 系（anyrouter.top 及同源站，带阿里云 WAF）
  * 鉴权：Cookie: session=<值> + New-Api-User: <站点用户ID>
  * 签到：POST /api/user/sign_in；纯 HTTP 会被 WAF 拦截，
@@ -41,9 +55,13 @@ export default {
         info: { ok: false, msg: WAF_MSG }
       }
     }
+    const checkin = parseCheckinResult(session.checkin.status, session.checkin.json)
+    if (!checkin.ok && session.checkin.status === 0) {
+      checkin.msg = '页面内签到请求被站点刷新中断，请稍后重试'
+    }
     return {
-      checkin: parseCheckinResult(session.checkin.status, session.checkin.json),
-      info: parseUserInfo(session.self.json)
+      checkin,
+      info: parseSelfWithDiag(session.self)
     }
   },
 
@@ -68,6 +86,6 @@ export default {
     }
     const result = await anyrouterUserInfo(account)
     if (result.wafBlocked) return { ok: false, msg: WAF_MSG }
-    return parseUserInfo(result.self.json)
+    return parseSelfWithDiag(result.self)
   }
 }

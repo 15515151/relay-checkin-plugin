@@ -9,7 +9,7 @@ schedule:
   # 触发后随机延迟 0~N 分钟再开始执行（避免整点并发特征），0 为不延迟
   jitterMinutes: 10
   # 相邻两个账号签到之间的随机间隔（秒），[最小, 最大]
-  accountDelay: [5, 15]
+  accountDelay: [1, 5]
 
 # 定时签到结果推送
 push:
@@ -26,7 +26,7 @@ request:
   # 单次请求超时（秒）
   timeout: 15
   # 网络错误重试次数
-  retry: 1
+  retry: 3
   userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 # 无头浏览器方案（AnyRouter 过阿里云 WAF、Turnstile 站点自动降级签到）
@@ -44,6 +44,7 @@ bind:
   # 等待私聊补发凭据的超时时间（秒）
   timeoutSec: 300
   # 群内绑定提示/回执消息自动撤回秒数，防多人使用刷屏；0 = 不撤回
+  # 绑定出结果（成功/失败/超时）时提示消息会立即撤回，此处是未出结果时的兜底时间
   # 注意：QQ 只允许撤回 2 分钟内自己发的消息，最大 120
   groupRecallSec: 60
 

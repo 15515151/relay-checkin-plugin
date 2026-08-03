@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { DATA_PATH } from './config.js'
+import { DATA_PATH, renameWithRetry } from './config.js'
 
 const STORE_PATH = path.join(DATA_PATH, 'accounts.json')
 const PUSH_GROUPS_PATH = path.join(DATA_PATH, 'push_groups.json')
@@ -44,7 +44,7 @@ function save() {
   if (!fs.existsSync(DATA_PATH)) fs.mkdirSync(DATA_PATH, { recursive: true })
   const tmp = STORE_PATH + '.tmp'
   fs.writeFileSync(tmp, JSON.stringify(storeCache, null, 2))
-  fs.renameSync(tmp, STORE_PATH)
+  renameWithRetry(tmp, STORE_PATH)
 }
 
 /**
@@ -200,7 +200,7 @@ function savePushGroups() {
   if (!fs.existsSync(DATA_PATH)) fs.mkdirSync(DATA_PATH, { recursive: true })
   const tmp = PUSH_GROUPS_PATH + '.tmp'
   fs.writeFileSync(tmp, JSON.stringify(pushGroupsCache, null, 2))
-  fs.renameSync(tmp, PUSH_GROUPS_PATH)
+  renameWithRetry(tmp, PUSH_GROUPS_PATH)
 }
 
 /**

@@ -76,7 +76,7 @@ AnyRouter 同理（`#中转添加cookie anyrouter.top <session值> <用户ID>`�
 - `push.usersPerImage`：群合并转发每张图最多展示的用户数（默认 5）
 - `browser.enable`：无头浏览器方案开关（AnyRouter 过 WAF、Turnstile 站点降级签到）
 - `bind.timeoutSec`：发起绑定后等待私聊补发凭据的超时秒数（默认 300）
-- `bind.groupRecallSec`：群内绑定提示/回执消息自动撤回秒数，防多人使用刷屏（默认 60，0 不撤回；QQ 限制最大 120）
+- `bind.groupRecallSec`：群内绑定提示/回执消息自动撤回秒数，防多人使用刷屏（默认 60，0 不撤回；QQ 限制最大 120）。绑定出结果（成功/失败/超时）时提示消息会立即撤回，该秒数是未出结果时的兜底
 - `proxy.url`：代理地址（anyrouter.top 等国内无法直连的站点用），如 Clash 的 `http://127.0.0.1:7890`，支持 `http://user:pass@host:port`；留空不使用。无头浏览器方案同样走此代理
 - `proxy.hosts`：需要走代理的站点域名关键字（包含匹配），默认 `[anyrouter]`；留空数组则配置代理后全部站点走代理
 - `recallAdd`：群里发含令牌的添加指令后是否尝试撤回消息

@@ -10,6 +10,22 @@ export const PLUGIN_PATH = path.join(__dirname, '..')
 export const DATA_PATH = path.join(PLUGIN_PATH, 'data')
 export const CONFIG_PATH = path.join(DATA_PATH, 'config.yaml')
 
+/**
+ * 原子写入用的重命名：Windows 下杀软/同步盘可能短暂锁住文件导致 EPERM，短暂重试
+ */
+export function renameWithRetry(from, to, tries = 5) {
+  for (let i = 0; ; i++) {
+    try {
+      fs.renameSync(from, to)
+      return
+    } catch (err) {
+      if (i >= tries - 1 || !['EPERM', 'EBUSY', 'EACCES'].includes(err.code)) throw err
+      const end = Date.now() + 50
+      while (Date.now() < end) { /* 等待锁释放 */ }
+    }
+  }
+}
+
 const DEFAULT_CONFIG = {
   schedule: {
     enable: true,
@@ -117,7 +133,7 @@ function syncNewConfigKeys(userConfig) {
     apply(userConfig, [])
     const tmp = CONFIG_PATH + '.tmp'
     fs.writeFileSync(tmp, doc.toString())
-    fs.renameSync(tmp, CONFIG_PATH)
+    renameWithRetry(tmp, CONFIG_PATH)
     logger.mark(`[relay-checkin-plugin] 配置文件已补充新增项: ${missing.join(', ')}`)
   } catch (err) {
     logger.error(`[relay-checkin-plugin] 配置文件同步新增项失败: ${err.message}`)

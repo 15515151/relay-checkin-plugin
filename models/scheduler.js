@@ -129,7 +129,11 @@ async function pushResults(done, cfg) {
         // TRSS 多 bot 时全局 Bot.uin 是数组，转发节点头像直接用所属 bot 的 QQ
         user_id: Number(selfId) || selfId
       }))
-      await group.sendMsg(await Bot.makeForwardMsg(nodes))
+      // Miao-Yunzai（icqq）在群对象上构造合并转发；TRSS 用全局 Bot.makeForwardMsg
+      const forward = group.makeForwardMsg
+        ? await group.makeForwardMsg(nodes)
+        : await Bot.makeForwardMsg(nodes)
+      await group.sendMsg(forward)
     } catch (err) {
       logger.error(`[relay-checkin-plugin] 群 ${groupId} 推送失败: ${err?.message || err}`)
     }

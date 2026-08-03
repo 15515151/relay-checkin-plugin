@@ -22,14 +22,19 @@ let proxyAgentCache = null
 
 /**
  * 复用 Yunzai 根目录自带的 https-proxy-agent 构建代理 Agent（按代理地址缓存）
+ * 兼容 v7（具名导出 HttpsProxyAgent）与 v5（默认导出）
  */
 async function getProxyAgent(proxyUrl) {
   if (proxyAgentCache?.url === proxyUrl) return proxyAgentCache.agent
-  let HttpsProxyAgent
+  let mod
   try {
-    ({ HttpsProxyAgent } = await import('https-proxy-agent'))
+    mod = await import('https-proxy-agent')
   } catch {
     throw new Error('未找到 https-proxy-agent 依赖（Yunzai 自带），代理不可用')
+  }
+  const HttpsProxyAgent = mod.HttpsProxyAgent ?? mod.default
+  if (typeof HttpsProxyAgent !== 'function') {
+    throw new Error('https-proxy-agent 版本不兼容，代理不可用')
   }
   proxyAgentCache = { url: proxyUrl, agent: new HttpsProxyAgent(proxyUrl) }
   return proxyAgentCache.agent
