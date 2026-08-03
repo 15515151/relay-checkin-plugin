@@ -172,6 +172,17 @@ try {
   assert.equal(all.length, 1)
   assert.equal(all[0].key, 'u:111')
 
+  // 定时推送白名单
+  assert.equal(store.isPushGroup('999'), false)
+  assert.equal(store.setPushGroup('999', true), true)
+  assert.equal(store.setPushGroup('999', true), false, '重复开启应返回未变化')
+  assert.equal(store.isPushGroup(999), true, '数字/字符串群号应等价')
+  assert.equal(store.setPushGroup('999', false), true)
+  assert.equal(store.isPushGroup('999'), false)
+  store.setPushGroup('888', true)
+  assert.ok(fs.existsSync(path.join(DATA, 'push_groups.json')), '白名单应落盘')
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(DATA, 'push_groups.json'), 'utf-8')), ['888'])
+
   // 持久化落盘验证
   const onDisk = JSON.parse(fs.readFileSync(path.join(DATA, 'accounts.json'), 'utf-8'))
   assert.ok(onDisk['u:111'])
@@ -196,6 +207,7 @@ try {
     checkin: /^#中转签到\s*(\d+)?$/,
     query: /^#中转查询$/,
     toggle: /^#中转定时\s*(开|关)\s*(\d+)?$/,
+    pushToggle: /^#中转(开启|关闭)(定时(签到)?)?群推送$/,
     bindPrefixed: /^#?中转绑定/,
     bind: /^[^#][\s\S]*$/
   }
@@ -214,6 +226,9 @@ try {
   assert.ok(rules.remove.test('#中转删除 1') && rules.remove.test('#中转删除3'))
   assert.ok(rules.toggle.test('#中转定时 开') && rules.toggle.test('#中转定时关'))
   assert.ok(rules.toggle.test('#中转定时 关 2') && rules.toggle.test('#中转定时开1'), '带序号的单账号定时开关应命中')
+  assert.ok(rules.pushToggle.test('#中转开启群推送') && rules.pushToggle.test('#中转关闭群推送'))
+  assert.ok(rules.pushToggle.test('#中转开启定时签到群推送'), '长格式应兼容')
+  assert.ok(!rules.pushToggle.test('#中转群推送'), '无开启/关闭动词不应命中')
   assert.ok(rules.bind.test('sess-value 12345'), '补发凭据规则应命中普通私聊消息')
   assert.ok(!rules.bind.test('#中转列表'), '补发凭据规则不应吞掉 # 开头指令')
   assert.ok(rules.bindPrefixed.test('中转绑定 tok') && rules.bindPrefixed.test('#中转绑定 tok'), 'disableAdopt 放行用的前缀格式应命中')

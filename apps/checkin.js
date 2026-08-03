@@ -1,5 +1,5 @@
 import { getConfig } from '../models/config.js'
-import { touchEntry, upsertAccount, removeAccount, setAuto, setAccountAuto, accountLabel, persist } from '../models/store.js'
+import { touchEntry, upsertAccount, removeAccount, setAuto, setAccountAuto, accountLabel, persist, setPushGroup } from '../models/store.js'
 import { probeAccount, normalizeBaseUrl, getAdapter, cookieTypeForHost } from '../models/adapters/index.js'
 import { checkinEntry, queryEntry } from '../models/executor.js'
 import { renderResult, renderList, renderHelp } from '../models/render.js'
@@ -82,6 +82,7 @@ export default class RelayCheckinApp extends plugin {
         { reg: '^#中转签到\\s*(\\d+)?$', fnc: 'checkin' },
         { reg: '^#中转查询$', fnc: 'query' },
         { reg: '^#中转定时\\s*(开|关)\\s*(\\d+)?$', fnc: 'toggleAuto' },
+        { reg: '^#中转(开启|关闭)(定时(签到)?)?群推送$', fnc: 'togglePushGroup' },
         // 私聊补发凭据：带「中转绑定」前缀（配合 disableAdopt 放行）或任意非指令消息
         { reg: '^#?中转绑定', fnc: 'bindCredentials', log: false },
         { reg: '^[^#][\\s\\S]*$', fnc: 'bindCredentials', log: false }
@@ -499,6 +500,35 @@ export default class RelayCheckinApp extends plugin {
 
     setAuto(this.e, enable)
     await this.reply(`定时签到总开关已${enable ? '开启' : '关闭'}（可用 #中转定时 开/关 序号 单独控制某个账号）`)
+    return true
+  }
+
+  /**
+   * #中转开启群推送 / #中转关闭群推送（兼容 #中转开启定时签到群推送）
+   * 定时签到结果只推送到开启过的群（白名单）；仅群主/管理员/机器人主人可操作
+   */
+  async togglePushGroup() {
+    if (!this.e.isGroup) {
+      await this.reply('请在需要开启/关闭推送的群里发送该指令')
+      return true
+    }
+    const role = this.e.sender?.role
+    const isAdmin = this.e.isMaster || this.e.member?.is_owner || this.e.member?.is_admin ||
+      role === 'owner' || role === 'admin'
+    if (!isAdmin) {
+      await this.reply('仅群主/管理员或机器人主人可操作本群的定时推送开关')
+      return true
+    }
+
+    const enable = this.e.msg.includes('开启')
+    const changed = setPushGroup(this.e.group_id, enable)
+    if (enable) {
+      await this.reply(changed
+        ? '已开启本群的定时签到结果推送（群内有人绑定过账号且仍在群时才会实际推送）'
+        : '本群已处于开启状态')
+    } else {
+      await this.reply(changed ? '已关闭本群的定时签到结果推送' : '本群本来就未开启推送')
+    }
     return true
   }
 }

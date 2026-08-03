@@ -60,6 +60,7 @@
     <div class="cmd-row"><span class="cmd">#中转查询</span><span class="desc">查询各账号余额</span></div>
     <div class="cmd-row"><span class="cmd">#中转定时 开/关</span><span class="desc">每日自动签到总开关</span></div>
     <div class="cmd-row"><span class="cmd">#中转定时 开/关 序号</span><span class="desc">单个账号的定时开关（默认开）</span></div>
+    <div class="cmd-row"><span class="cmd">#中转开启/关闭群推送</span><span class="desc">本群是否接收定时推送结果（群管理，默认关）</span></div>
   </div>
 
   <div class="section">
@@ -69,6 +70,7 @@
       · 机器人开启私聊禁用（disablePrivate）时：主人在 disableAdopt 加入 中转 后，私聊改发「中转绑定 凭据」<br>
       · 令牌为站点「个人设置 → 系统访问令牌」生成的 token；群里发含令牌的完整指令会尝试撤回<br>
       · 同一站点可添加多个账号（按站点用户ID区分），数据按 QQ 隔离，删除/定时只影响自己<br>
+      · 定时结果只推送到已开启推送的群（群管理发 #中转开启群推送），群内无绑定用户不推；只私聊用过则私聊推送<br>
       · AnyRouter / AgentRouter（含 *.air-outer.com）用 Cookie 方式添加：F12 复制 session 值与用户ID<br>
       · 支持 new-api / Veloera 及同源魔改站；Turnstile 人机验证站点自动切换浏览器方案签到<br>
       · AnyRouter 有阿里云 WAF，签到走无头浏览器，耗时略长属正常现象

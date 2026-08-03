@@ -3,8 +3,10 @@ import path from 'node:path'
 import { DATA_PATH } from './config.js'
 
 const STORE_PATH = path.join(DATA_PATH, 'accounts.json')
+const PUSH_GROUPS_PATH = path.join(DATA_PATH, 'push_groups.json')
 
 let storeCache = null
+let pushGroupsCache = null
 
 /**
  * 存储结构（data/accounts.json）：
@@ -174,4 +176,56 @@ export function allEntries() {
  */
 export function persist() {
   if (storeCache) save()
+}
+
+/**
+ * 定时推送白名单（data/push_groups.json，群号字符串数组）：
+ * 群推送模式下只有名单内的群才会收到定时签到结果
+ */
+function loadPushGroups() {
+  if (pushGroupsCache) return pushGroupsCache
+  try {
+    pushGroupsCache = fs.existsSync(PUSH_GROUPS_PATH)
+      ? JSON.parse(fs.readFileSync(PUSH_GROUPS_PATH, 'utf-8'))
+      : []
+    if (!Array.isArray(pushGroupsCache)) pushGroupsCache = []
+  } catch (err) {
+    logger.error(`[relay-checkin-plugin] 推送白名单读取失败: ${err.message}`)
+    pushGroupsCache = []
+  }
+  return pushGroupsCache
+}
+
+function savePushGroups() {
+  if (!fs.existsSync(DATA_PATH)) fs.mkdirSync(DATA_PATH, { recursive: true })
+  const tmp = PUSH_GROUPS_PATH + '.tmp'
+  fs.writeFileSync(tmp, JSON.stringify(pushGroupsCache, null, 2))
+  fs.renameSync(tmp, PUSH_GROUPS_PATH)
+}
+
+/**
+ * 某群是否在定时推送白名单内
+ */
+export function isPushGroup(groupId) {
+  return loadPushGroups().includes(String(groupId))
+}
+
+/**
+ * 开关某群的定时推送，返回状态是否发生变化（重复开/关返回 false）
+ */
+export function setPushGroup(groupId, enable) {
+  const list = loadPushGroups()
+  const gid = String(groupId)
+  const idx = list.indexOf(gid)
+  if (enable && idx < 0) {
+    list.push(gid)
+    savePushGroups()
+    return true
+  }
+  if (!enable && idx >= 0) {
+    list.splice(idx, 1)
+    savePushGroups()
+    return true
+  }
+  return false
 }
