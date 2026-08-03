@@ -45,11 +45,12 @@
 
   <div class="section">
     <div class="section-title">账号管理</div>
-    <div class="cmd-row"><span class="cmd">#中转添加 地址 令牌</span><span class="desc">添加账号（自动识别站点类型）</span></div>
-    <div class="cmd-row"><span class="cmd">#中转添加 地址 令牌 用户ID</span><span class="desc">Veloera 站点需附加站点用户ID</span></div>
-    <div class="cmd-row"><span class="cmd">#中转添加cookie 地址 session值 用户ID</span><span class="desc">Cookie 方式（AgentRouter/旧版站点）</span></div>
-    <div class="cmd-row"><span class="cmd">#中转列表</span><span class="desc">查看我的账号</span></div>
-    <div class="cmd-row"><span class="cmd">#中转删除 序号</span><span class="desc">删除指定账号</span></div>
+    <div class="cmd-row"><span class="cmd">#中转添加 地址</span><span class="desc">发起绑定，再私聊机器人发送令牌（推荐）</span></div>
+    <div class="cmd-row"><span class="cmd">#中转添加 地址 令牌 [用户ID]</span><span class="desc">直接添加（建议只在私聊用，Veloera 需用户ID）</span></div>
+    <div class="cmd-row"><span class="cmd">#中转添加cookie 地址</span><span class="desc">发起 Cookie 绑定，再私聊发送 session值 用户ID</span></div>
+    <div class="cmd-row"><span class="cmd">#中转添加cookie 地址 session值 用户ID</span><span class="desc">直接添加（AnyRouter/AgentRouter/旧版站点）</span></div>
+    <div class="cmd-row"><span class="cmd">#中转列表</span><span class="desc">查看我的账号（含余额与今日签到状态）</span></div>
+    <div class="cmd-row"><span class="cmd">#中转删除 序号</span><span class="desc">删除自己的指定账号</span></div>
   </div>
 
   <div class="section">
@@ -57,16 +58,20 @@
     <div class="cmd-row"><span class="cmd">#中转签到</span><span class="desc">立即签到全部账号</span></div>
     <div class="cmd-row"><span class="cmd">#中转签到 序号</span><span class="desc">签到指定账号</span></div>
     <div class="cmd-row"><span class="cmd">#中转查询</span><span class="desc">查询各账号余额</span></div>
-    <div class="cmd-row"><span class="cmd">#中转定时 开/关</span><span class="desc">开关每日自动签到</span></div>
+    <div class="cmd-row"><span class="cmd">#中转定时 开/关</span><span class="desc">每日自动签到总开关</span></div>
+    <div class="cmd-row"><span class="cmd">#中转定时 开/关 序号</span><span class="desc">单个账号的定时开关（默认开）</span></div>
   </div>
 
   <div class="section">
     <div class="section-title">说明</div>
     <div class="tip">
-      · 令牌为站点「个人设置 → 系统访问令牌」生成的 token，建议私聊添加，群里添加会尝试撤回消息<br>
-      · 数据按用户隔离：同一 QQ 在任意群/私聊共享账号，定时结果推送到最近使用的群<br>
-      · AgentRouter 用 Cookie 方式添加：F12 复制 session 值与用户ID（自动识别，访问即续期保活）<br>
-      · 支持 new-api / Veloera 及同源魔改站；开启 Turnstile 人机验证的站点无法自动签到
+      · 群里推荐只发「#中转添加 地址」，令牌/session 私聊补发，绑定结果会引用原消息回到群里提示<br>
+      · 机器人开启私聊禁用（disablePrivate）时：主人在 disableAdopt 加入 中转 后，私聊改发「中转绑定 凭据」<br>
+      · 令牌为站点「个人设置 → 系统访问令牌」生成的 token；群里发含令牌的完整指令会尝试撤回<br>
+      · 同一站点可添加多个账号（按站点用户ID区分），数据按 QQ 隔离，删除/定时只影响自己<br>
+      · AnyRouter / AgentRouter（含 *.air-outer.com）用 Cookie 方式添加：F12 复制 session 值与用户ID<br>
+      · 支持 new-api / Veloera 及同源魔改站；Turnstile 人机验证站点自动切换浏览器方案签到<br>
+      · AnyRouter 有阿里云 WAF，签到走无头浏览器，耗时略长属正常现象
     </div>
   </div>
 

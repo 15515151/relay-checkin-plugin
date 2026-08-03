@@ -26,7 +26,8 @@ export async function runScheduledCheckin() {
       await sleep(delayMs)
     }
 
-    const entries = allEntries().filter(en => en.autoCheckin && en.accounts.length > 0)
+    // 总开关打开且至少有一个账号开着单账号定时开关的用户才参与
+    const entries = allEntries().filter(en => en.autoCheckin && en.accounts.some(acc => acc.auto !== false))
     if (!entries.length) {
       logger.info('[relay-checkin-plugin] 无需要定时签到的账号')
       return
@@ -42,7 +43,7 @@ export async function runScheduledCheckin() {
     const done = []
     for (let i = 0; i < entries.length; i++) {
       if (i > 0) await sleep(randInt(delayRange[0], delayRange[1]) * 1000)
-      const results = await checkinEntry(entries[i], { delayRange })
+      const results = await checkinEntry(entries[i], { delayRange, autoOnly: true })
       done.push({ entry: entries[i], results })
     }
 

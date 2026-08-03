@@ -38,7 +38,7 @@ global.fetch = async (url, opts = {}) => {
 try {
   const agentrouter = (await import('../models/adapters/agentrouter.js')).default
   const { probeAccount } = await import('../models/adapters/index.js')
-  const { checkinAccount } = await import('../models/executor.js')
+  const { checkinAccount, checkinEntry } = await import('../models/executor.js')
 
   const AR = { name: 'agentrouter.org', baseUrl: 'https://agentrouter.org', type: 'agentrouter', token: 'S', siteUserId: 7 }
 
@@ -71,6 +71,8 @@ try {
   assert.equal(res.statusText, '保活成功')
   assert.equal(res.balance, '$10.00')
   assert.equal(selfCalls, 1, '降级保活后不应重复查询用户信息')
+  assert.equal(AR.lastBalance, '$10.00', '签到后应缓存余额供列表展示')
+  assert.ok(AR.lastCheckinAt, '签到后应记录签到时间供列表展示')
 
   // ---- 3. agentrouter：session 失效 ----
   routes = {
@@ -79,6 +81,17 @@ try {
   }
   r = await agentrouter.checkin(AR)
   assert.equal(r.ok, false)
+
+  // ---- 3.5 checkinEntry autoOnly：定时任务只签单账号开关打开的 ----
+  routes = {
+    'POST https://agentrouter.org/api/user/sign_in': { status: 200, body: { success: true, message: '签到成功' } },
+    'GET https://agentrouter.org/api/user/self': { status: 200, body: { success: true, data: { id: 7, quota: 5000000, used_quota: 0 } } }
+  }
+  const entryAuto = { accounts: [{ ...AR }, { ...AR, name: 'off.org', auto: false }] }
+  const autoRes = await checkinEntry(entryAuto, { autoOnly: true })
+  assert.equal(autoRes.length, 1, 'autoOnly 应跳过关闭定时的账号')
+  const manualRes = await checkinEntry(entryAuto, {})
+  assert.equal(manualRes.length, 2, '手动签到不受单账号定时开关影响')
 
   // ---- 4. probeAccount：new-api 命中 ----
   let capturedAuth = ''
@@ -124,6 +137,27 @@ try {
   const bad = await checkinAccount({ name: 'x.com', baseUrl: 'https://x.com', type: 'newapi', token: 't' })
   assert.equal(bad.status, 'fail')
   assert.ok(bad.msg.length > 0)
+
+  // ---- 7. Turnstile 站点自动触发浏览器降级链路 ----
+  // 站点未配置 site key 时应停在降级入口并给出明确提示（不触碰 puppeteer）
+  routes = {
+    'POST https://t.com/api/user/checkin': { status: 200, body: { success: false, message: 'Turnstile token 为空' } },
+    'GET https://t.com/api/status': { status: 200, body: { success: true, data: {} } },
+    'GET https://t.com/api/user/self': { status: 200, body: { success: true, data: { id: 1, quota: 500000, used_quota: 0 } } }
+  }
+  const ts = await checkinAccount({ name: 't.com', baseUrl: 'https://t.com', type: 'newapi', token: 'T', siteUserId: 1 })
+  assert.equal(ts.status, 'fail')
+  assert.match(ts.msg, /site key/, '应触发降级并提示缺少 site key')
+  assert.equal(ts.balance, '$1.00', '降级失败不影响余额查询')
+
+  // ---- 8. AnyRouter：无 WAF 镜像站可直接 HTTP 查询用户信息 ----
+  const anyrouter = (await import('../models/adapters/anyrouter.js')).default
+  routes = {
+    'GET https://anyrouter.top/api/user/self': { status: 200, body: { success: true, data: { id: 8, username: 'a', quota: 2500000, used_quota: 0 } } }
+  }
+  const arInfo = await anyrouter.userInfo({ name: 'anyrouter.top', baseUrl: 'https://anyrouter.top', type: 'anyrouter', token: 'S', siteUserId: 8 })
+  assert.equal(arInfo.ok, true)
+  assert.equal(arInfo.balanceText, '$5.00')
   console.log('适配器行为 OK')
 
   // ---- 7. art-template 渲染模板（与 TRSS-Yunzai 同引擎）----
@@ -148,9 +182,13 @@ try {
 
   html = art(path.join(tplDir, 'list.html'), {
     nickname: 'N', userId: '111', autoText: '已开启', time: 'T',
-    accounts: [{ index: 1, name: 'a.com', baseUrl: 'https://a.com', typeLabel: 'new-api', tokenMasked: 'abcd****wxyz' }]
+    accounts: [{
+      index: 1, name: 'a.com (u1)', baseUrl: 'https://a.com', typeLabel: 'new-api', tokenMasked: 'abcd****wxyz',
+      balance: '$12.30', checkinText: '今日已签', checkinClass: 'on', autoText: '定时开', autoClass: 'on'
+    }]
   })
-  assert.ok(html.includes('a.com') && html.includes('abcd****wxyz') && !html.includes('暂无账号'))
+  assert.ok(html.includes('a.com (u1)') && html.includes('abcd****wxyz') && !html.includes('暂无账号'))
+  assert.ok(html.includes('余额 $12.30') && html.includes('今日已签') && html.includes('定时开'), '列表应展示余额与签到/定时状态')
   html = art(path.join(tplDir, 'list.html'), { nickname: 'N', userId: '1', autoText: '已开启', time: 'T', accounts: [] })
   assert.ok(html.includes('暂无账号'))
 

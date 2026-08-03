@@ -28,6 +28,9 @@ try {
   assert.equal(cfg.push.mode, 'group')
   assert.equal(cfg.push.usersPerImage, 5)
   assert.deepEqual(cfg.schedule.accountDelay, [5, 15])
+  assert.equal(cfg.browser.enable, true)
+  assert.equal(cfg.browser.wafTimeoutSec, 25)
+  assert.equal(cfg.bind.timeoutSec, 300)
   assert.ok(fs.existsSync(path.join(DATA, 'config.yaml')), 'config.yaml 应自动生成')
   console.log('config OK')
 
@@ -67,6 +70,8 @@ try {
   assert.equal(normalizeBaseUrl('http://a.b//'), 'http://a.b')
   assert.equal(cookieTypeForHost('agentrouter.org'), 'agentrouter')
   assert.equal(cookieTypeForHost('xx.agentrouter.cn'), 'agentrouter')
+  assert.equal(cookieTypeForHost('ps.air-outer.com'), 'agentrouter', 'air-outer.com 系域名应识别为 AgentRouter')
+  assert.equal(cookieTypeForHost('anyrouter.top'), 'anyrouter')
   assert.equal(cookieTypeForHost('other.com'), 'generic')
   assert.equal(getAdapter('veloera').type, 'veloera')
   assert.equal(getAdapter('不存在').type, 'newapi')
@@ -90,9 +95,18 @@ try {
   h = agentrouter.buildHeaders({ token: 'S', siteUserId: 7 })
   assert.equal(h.Cookie, 'session=S')
   assert.equal(h['New-Api-User'], '7')
+  const anyrouter = (await import('../models/adapters/anyrouter.js')).default
+  h = anyrouter.buildHeaders({ token: 'S', siteUserId: 8 })
+  assert.equal(h.Cookie, 'session=S')
+  assert.equal(h['New-Api-User'], '8')
+  // Turnstile 降级依赖各令牌型适配器声明签到路径
+  const newapiMod = (await import('../models/adapters/newapi.js')).default
+  const veloeraMod = (await import('../models/adapters/veloera.js')).default
+  assert.equal(newapiMod.checkinPath, '/api/user/checkin')
+  assert.equal(veloeraMod.checkinPath, '/api/user/check_in')
   console.log('adapter headers OK')
 
-  // ---- store（仅用户隔离）----
+  // ---- store（仅用户隔离 + 同站多账号）----
   const store = await import('../models/store.js')
   const eGroup = { user_id: 111, group_id: 999, isGroup: true, self_id: 10000, sender: { nickname: 'N1', card: 'C1' } }
   const ePrivate = { user_id: 111, isGroup: false, self_id: 10000, sender: { nickname: 'N1' } }
@@ -104,26 +118,56 @@ try {
   const en1 = store.ensureEntry(eGroup)
   assert.equal(en1.groupId, '999')
   assert.equal(en1.nickname, 'C1', '群名片优先')
-  store.addAccount(eGroup, { name: 'a.com', baseUrl: 'https://a.com', type: 'newapi', token: 't1', siteUserId: 1, signPath: null })
 
-  // 私聊可见同一账号；且私聊不清空 groupId
+  const acc = (over = {}) => ({
+    name: 'a.com', baseUrl: 'https://a.com', type: 'agentrouter', token: 't1',
+    siteUserId: 1, signPath: null, auto: true, username: 'u1', ...over
+  })
+  let up = store.upsertAccount(eGroup, acc())
+  assert.deepEqual([up.index, up.updated], [1, false])
+
+  // 同站点不同站点用户ID → 追加为新账号（同站多账号）
+  up = store.upsertAccount(eGroup, acc({ siteUserId: 2, token: 't2', username: 'u2' }))
+  assert.deepEqual([up.index, up.updated], [2, false])
+  assert.equal(store.getEntry(eGroup).accounts.length, 2)
+
+  // 同站点同站点用户ID → 更新凭据，且保留单账号定时开关偏好
+  store.setAccountAuto(eGroup, 1, false)
+  up = store.upsertAccount(eGroup, acc({ token: 't1-new' }))
+  assert.deepEqual([up.index, up.updated], [1, true])
+  let entryNow = store.getEntry(eGroup)
+  assert.equal(entryNow.accounts.length, 2)
+  assert.equal(entryNow.accounts[0].token, 't1-new')
+  assert.equal(entryNow.accounts[0].auto, false, '更新凭据不应重置单账号定时开关')
+
+  // 无 siteUserId 时按 token 匹配
+  up = store.upsertAccount(eGroup, acc({ name: 'b.com', baseUrl: 'https://b.com', siteUserId: null, token: 'bt' }))
+  assert.equal(up.updated, false)
+  up = store.upsertAccount(eGroup, acc({ name: 'b.com', baseUrl: 'https://b.com', siteUserId: null, token: 'bt' }))
+  assert.deepEqual([up.index, up.updated], [3, true])
+
+  // accountLabel / setAccountAuto 边界
+  assert.equal(store.accountLabel({ name: 'x.com', username: 'U' }), 'x.com (U)')
+  assert.equal(store.accountLabel({ name: 'x.com' }), 'x.com')
+  assert.equal(store.setAccountAuto(eGroup, 99, false), null)
+
+  // 私聊可见同一批账号；且私聊不清空 groupId
   const en2 = store.touchEntry(ePrivate)
-  assert.equal(en2.accounts.length, 1, '私聊应共享群里添加的账号')
+  assert.equal(en2.accounts.length, 3, '私聊应共享群里添加的账号')
   assert.equal(en2.groupId, '999', '私聊使用不应清空最近群')
 
   // 换群后 groupId 跟随最近使用的群
   store.touchEntry(eOtherGroup)
   assert.equal(store.getEntry(ePrivate).groupId, '888')
 
-  // 删除
-  assert.equal(store.removeAccount(eGroup, 2), null)
-  assert.equal(store.removeAccount(eGroup, 1).name, 'a.com')
-  assert.equal(store.getEntry(eGroup).accounts.length, 0)
+  // 删除（仅操作本用户数据）
+  assert.equal(store.removeAccount(eGroup, 9), null)
+  assert.equal(store.removeAccount(eGroup, 3).name, 'b.com')
+  assert.equal(store.getEntry(eGroup).accounts.length, 2)
 
-  // 定时开关 + allEntries
+  // 定时总开关 + allEntries
   store.setAuto(eGroup, false)
   assert.equal(store.getEntry(eGroup).autoCheckin, false)
-  store.addAccount(eGroup, { name: 'b.com', baseUrl: 'https://b.com', type: 'veloera', token: 't2', siteUserId: 2, signPath: null })
   const all = store.allEntries()
   assert.equal(all.length, 1)
   assert.equal(all[0].key, 'u:111')
@@ -131,7 +175,7 @@ try {
   // 持久化落盘验证
   const onDisk = JSON.parse(fs.readFileSync(path.join(DATA, 'accounts.json'), 'utf-8'))
   assert.ok(onDisk['u:111'])
-  assert.equal(onDisk['u:111'].accounts[0].name, 'b.com')
+  assert.equal(onDisk['u:111'].accounts[0].token, 't1-new')
   console.log('store OK')
 
   // ---- executor 纯逻辑（randInt 边界）----
@@ -145,23 +189,34 @@ try {
   // ---- 指令正则（与 apps/checkin.js 保持一致）----
   const rules = {
     help: /^#中转(站)?(帮助|help)$/,
-    addCookie: /^#中转添加[cC]ookie\s+(\S+)\s+(\S+)\s+(\S+)$/,
-    add: /^#中转添加\s+(\S+)\s+(\S+)(?:\s+(\S+))?$/,
+    addCookie: /^#中转添加[cC]ookie\s+\S+(?:\s+\S+)*$/,
+    add: /^#中转添加\s+\S+(?:\s+\S+)*$/,
     list: /^#中转列表$/,
     remove: /^#中转删除\s*(\d+)$/,
     checkin: /^#中转签到\s*(\d+)?$/,
     query: /^#中转查询$/,
-    toggle: /^#中转定时\s*(开|关)$/
+    toggle: /^#中转定时\s*(开|关)\s*(\d+)?$/,
+    bindPrefixed: /^#?中转绑定/,
+    bind: /^[^#][\s\S]*$/
   }
   assert.ok(rules.help.test('#中转帮助') && rules.help.test('#中转站help'))
   assert.ok(rules.add.test('#中转添加 https://x.com abc'))
   assert.ok(rules.add.test('#中转添加 x.com abc 123'))
+  assert.ok(rules.add.test('#中转添加 x.com'), '仅地址应命中（发起私聊绑定流程）')
+  assert.ok(rules.add.test('#中转添加 x.com abc 123 多余参数'), '参数过多也应命中，以便撤回并提示')
   assert.ok(!rules.add.test('#中转添加cookie x.com s 1'), 'addCookie 消息不应命中 add 规则')
   assert.ok(rules.addCookie.test('#中转添加cookie x.com sess 1'))
   assert.ok(rules.addCookie.test('#中转添加Cookie x.com sess 1'))
+  assert.ok(rules.addCookie.test('#中转添加cookie x.com'), '仅地址应命中（发起私聊绑定流程）')
+  assert.ok(rules.addCookie.test('#中转添加cookie x.com sess'), '缺用户ID也应命中，由处理器提示补全')
+  assert.ok(rules.addCookie.test('#中转添加cookie x.com sess 1 多余'), '参数过多也应命中，以便撤回并提示')
   assert.ok(rules.checkin.test('#中转签到') && rules.checkin.test('#中转签到 2') && rules.checkin.test('#中转签到2'))
   assert.ok(rules.remove.test('#中转删除 1') && rules.remove.test('#中转删除3'))
   assert.ok(rules.toggle.test('#中转定时 开') && rules.toggle.test('#中转定时关'))
+  assert.ok(rules.toggle.test('#中转定时 关 2') && rules.toggle.test('#中转定时开1'), '带序号的单账号定时开关应命中')
+  assert.ok(rules.bind.test('sess-value 12345'), '补发凭据规则应命中普通私聊消息')
+  assert.ok(!rules.bind.test('#中转列表'), '补发凭据规则不应吞掉 # 开头指令')
+  assert.ok(rules.bindPrefixed.test('中转绑定 tok') && rules.bindPrefixed.test('#中转绑定 tok'), 'disableAdopt 放行用的前缀格式应命中')
   console.log('指令正则 OK')
 
   console.log('\n全部冒烟测试通过 ✓')

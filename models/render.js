@@ -1,6 +1,7 @@
 import path from 'node:path'
 import puppeteer from '../../../lib/puppeteer/puppeteer.js'
 import { PLUGIN_PATH, getConfig } from './config.js'
+import { accountLabel } from './store.js'
 
 const TPL_PATH = path.join(PLUGIN_PATH, 'resources', 'template')
 
@@ -54,16 +55,25 @@ export async function renderResultPages({ title, users }) {
 }
 
 /**
- * 渲染账号列表
+ * 渲染账号列表（余额/签到状态来自最近一次操作的缓存）
  */
 export async function renderList({ nickname, userId, autoCheckin, accounts }) {
-  const rows = accounts.map((acc, i) => ({
-    index: i + 1,
-    name: acc.name,
-    baseUrl: acc.baseUrl,
-    typeLabel: { newapi: 'new-api', veloera: 'Veloera', generic: 'Cookie', agentrouter: 'AgentRouter' }[acc.type] || acc.type,
-    tokenMasked: maskToken(acc.token)
-  }))
+  const rows = accounts.map((acc, i) => {
+    const checkedToday = isCheckedToday(acc.lastCheckinAt)
+    const autoOn = acc.auto !== false
+    return {
+      index: i + 1,
+      name: accountLabel(acc),
+      baseUrl: acc.baseUrl,
+      typeLabel: { newapi: 'new-api', veloera: 'Veloera', generic: 'Cookie', agentrouter: 'AgentRouter', anyrouter: 'AnyRouter' }[acc.type] || acc.type,
+      tokenMasked: maskToken(acc.token),
+      balance: acc.lastBalance || '-',
+      checkinText: checkedToday ? '今日已签' : '今日未签',
+      checkinClass: checkedToday ? 'on' : 'off',
+      autoText: autoOn ? '定时开' : '定时关',
+      autoClass: autoOn ? 'on' : 'off'
+    }
+  })
   return await render('list', {
     nickname,
     userId,
@@ -71,6 +81,17 @@ export async function renderList({ nickname, userId, autoCheckin, accounts }) {
     time: now(),
     accounts: rows
   })
+}
+
+/**
+ * lastCheckinAt 是否为今天（本地时区；仅统计经本插件签到/保活成功的记录）
+ */
+function isCheckedToday(iso) {
+  if (!iso) return false
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return false
+  const n = new Date()
+  return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate()
 }
 
 /**

@@ -28,5 +28,19 @@ request:
   retry: 1
   userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
+# 无头浏览器方案（AnyRouter 过阿里云 WAF、Turnstile 站点自动降级签到）
+browser:
+  enable: true
+  # 等待 WAF 放行的最长时间（秒）
+  wafTimeoutSec: 25
+  # 等待 Turnstile 挑战完成的最长时间（秒）
+  turnstileTimeoutSec: 30
+  # 浏览器空闲多久后自动关闭（秒）
+  idleCloseSec: 300
+
+# 只发 #中转添加 地址 发起绑定后，等待私聊补发凭据的超时时间（秒）
+bind:
+  timeoutSec: 300
+
 # 群聊中使用 #中转添加 后，尝试撤回用户消息（令牌敏感），需机器人有管理员权限
 recallAdd: true

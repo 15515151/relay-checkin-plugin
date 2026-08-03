@@ -12,11 +12,13 @@ let storeCache = null
  *   "u:QQ号": {
  *     groupId, userId, selfId, nickname,
  *     autoCheckin: true,
- *     accounts: [{ name, baseUrl, type, token, siteUserId, signPath }]
+ *     accounts: [{ name, baseUrl, type, token, siteUserId, signPath,
+ *                  username, auto, lastBalance, lastCheckinAt }]
  *   }
  * }
  * 按用户隔离：同一 QQ 在任意群/私聊共享同一份账号数据；
- * groupId 记录最近一次在群内使用本插件的群号，作为定时推送目标（null = 私聊推送）
+ * groupId 记录最近一次在群内使用本插件的群号，作为定时推送目标（null = 私聊推送）；
+ * 同一站点可存多个账号，按站点用户ID区分；auto 为单账号定时开关（缺省视为开）
  */
 function load() {
   if (storeCache) return storeCache
@@ -98,13 +100,27 @@ function applyEvent(entry, e) {
 }
 
 /**
- * 添加账号
+ * 添加或更新账号：同站点同站点用户ID（都缺ID时同令牌）视为同一账号更新凭据，
+ * 否则作为新账号追加（同站多账号）；更新时保留 auto 偏好与运行时缓存
+ * @returns {{entry: object, index: number, updated: boolean}}
  */
-export function addAccount(e, account) {
+export function upsertAccount(e, account) {
   const entry = ensureEntry(e)
+  const idx = entry.accounts.findIndex(acc =>
+    acc.baseUrl === account.baseUrl &&
+    (acc.siteUserId != null && account.siteUserId != null
+      ? String(acc.siteUserId) === String(account.siteUserId)
+      : acc.token === account.token)
+  )
+  if (idx >= 0) {
+    const keep = entry.accounts[idx]
+    entry.accounts[idx] = { ...keep, ...account, auto: keep.auto !== false }
+    save()
+    return { entry, index: idx + 1, updated: true }
+  }
   entry.accounts.push(account)
   save()
-  return entry.accounts.length
+  return { entry, index: entry.accounts.length, updated: false }
 }
 
 /**
@@ -119,12 +135,30 @@ export function removeAccount(e, index) {
 }
 
 /**
- * 设置定时签到开关
+ * 设置定时签到总开关
  */
 export function setAuto(e, enable) {
   const entry = ensureEntry(e)
   entry.autoCheckin = enable
   save()
+}
+
+/**
+ * 设置单个账号的定时签到开关（序号 1 起），返回账号或 null
+ */
+export function setAccountAuto(e, index, enable) {
+  const entry = getEntry(e)
+  if (!entry || index < 1 || index > entry.accounts.length) return null
+  entry.accounts[index - 1].auto = enable
+  save()
+  return entry.accounts[index - 1]
+}
+
+/**
+ * 账号展示名：站点 host（+ 站点用户名区分同站多账号）
+ */
+export function accountLabel(account) {
+  return account.username ? `${account.name} (${account.username})` : account.name
 }
 
 /**
@@ -136,8 +170,8 @@ export function allEntries() {
 }
 
 /**
- * 持久化外部对 entry 的直接修改（如更新已有账号凭据）
+ * 持久化外部对 entry 的直接修改（如签到后更新余额缓存）
  */
 export function persist() {
-  save()
+  if (storeCache) save()
 }

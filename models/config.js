@@ -26,6 +26,15 @@ const DEFAULT_CONFIG = {
     retry: 1,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
   },
+  browser: {
+    enable: true,
+    wafTimeoutSec: 25,
+    turnstileTimeoutSec: 30,
+    idleCloseSec: 300
+  },
+  bind: {
+    timeoutSec: 300
+  },
   recallAdd: true
 }
 
