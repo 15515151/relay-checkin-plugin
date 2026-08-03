@@ -16,7 +16,7 @@ TRSS-Yunzai 中转站自动签到插件（OneBot v11）。支持主流开源中�
 在 Yunzai 根目录执行：
 
 ```bash
-git clone <本仓库地址> ./plugins/relay-checkin-plugin
+git clone https://github.com/Cat-bl/relay-checkin-plugin ./plugins/relay-checkin-plugin
 ```
 
 重启 Yunzai 即可，无额外依赖（复用 Yunzai 自带的 yaml / chokidar / puppeteer）。
