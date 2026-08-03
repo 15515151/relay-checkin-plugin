@@ -321,12 +321,16 @@ async function pageFetch(page, url, { method = 'GET', headers = {}, timeoutMs: o
   const timeoutMs = override ?? (getConfig().request.timeout || 15) * 1000
   try {
     const evaluating = page.evaluate(async ({ url, method, headers, timeoutMs }) => {
+      // 用 AbortController 而非 AbortSignal.timeout：后者要 Chrome 103+，
+      // 内置 Chromium 偏旧时会直接抛 TypeError 使每次请求都失败
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), timeoutMs)
       try {
         const res = await fetch(url, {
           method,
           headers,
           credentials: 'include',
-          signal: AbortSignal.timeout(timeoutMs)
+          signal: controller.signal
         })
         let json = null
         try {
@@ -337,6 +341,8 @@ async function pageFetch(page, url, { method = 'GET', headers = {}, timeoutMs: o
         return { status: res.status, json }
       } catch (err) {
         return { status: 0, json: null, error: String(err) }
+      } finally {
+        clearTimeout(timer)
       }
     }, { url, method, headers, timeoutMs })
     // evaluate 自身也可能不返回（挑战页导航中/渲染器卡住），外层再兜一层超时，
@@ -345,57 +351,6 @@ async function pageFetch(page, url, { method = 'GET', headers = {}, timeoutMs: o
   } catch (err) {
     return { status: 0, json: null, error: String(err?.message || err) }
   }
-}
-
-/**
- * 带重试的页内请求：WAF 挑战自刷新会中断页内 fetch（status 0），间隔重试几次
- */
-async function pageFetchRetry(page, url, opts, tries = 3, delayMs = 1500) {
-  let res = null
-  for (let i = 0; i < tries; i++) {
-    if (i > 0) await new Promise(r => setTimeout(r, delayMs))
-    res = await pageFetch(page, url, opts)
-    if (res.status !== 0) return res
-  }
-  return res
-}
-
-/**
- * 等待站点 API 可访问（WAF 放行标志）：页内请求 /api/status 返回有效 JSON
- * 且包含 success 或 data 字段（排除 WAF 拦截的 JSON 响应）；
- * 放行后短暂等待，避开挑战通过瞬间的页面刷新
- */
-async function waitApiReady(page, baseUrl, timeoutSec) {
-  // 先等挑战页把 JS 跑完（阿里云 WAF 靠 JS 设 acw_sc__v2 后自刷新），
-  // 参考实现同样是「等页面 complete → 再取 WAF cookie」而非立即请求接口
-  try {
-    await withTimeout(
-      page.waitForFunction('document.readyState === "complete"', { timeout: 8000 }),
-      10000, 'readyState 等待超时'
-    )
-  } catch {
-    await new Promise(r => setTimeout(r, 3000))
-  }
-  await logPageState(page)
-
-  const deadline = Date.now() + timeoutSec * 1000
-  let rounds = 0
-  let lastStatus = null
-  while (Date.now() < deadline) {
-    rounds++
-    // 每轮用较短超时，保证在 WAF 总预算内能探测多次
-    const { status, json, error } = await pageFetch(page, `${baseUrl}/api/status`, { timeoutMs: 8000 })
-    lastStatus = status
-    if (json && (json.success !== undefined || json.data !== undefined)) {
-      logger.info(`[relay-checkin-plugin] WAF 已放行（第 ${rounds} 次探测）`)
-      await new Promise(r => setTimeout(r, 800))
-      return true
-    }
-    logger.info(`[relay-checkin-plugin] WAF 探测 #${rounds}: HTTP ${status}${json ? ' (JSON 无 success/data)' : ' (非 JSON)'}${error ? ` err=${error}` : ''}`)
-    await new Promise(r => setTimeout(r, 1500))
-  }
-  logger.warn(`[relay-checkin-plugin] WAF 等待超时：探测 ${rounds} 次，最后状态 HTTP ${lastStatus}（可调大 browser.wafTimeoutSec）`)
-  return false
 }
 
 /**
@@ -416,11 +371,14 @@ async function logPageState(page) {
   }
 }
 
+
 /**
- * AnyRouter 系（阿里云 WAF）浏览器会话：注入 session cookie → 过 WAF → 页内签到 + 查询用户信息
- * @returns {Promise<{checkin: {status, json}, self: {status, json}}|{wafBlocked: true}>}
+ * 打开站点让阿里云 WAF 挑战通过，取出全部 cookie（含 WAF 三件套与 session）。
+ * 参考实现（dctx-team/Regular-inspection）同样是「浏览器只负责过 WAF 拿 cookie，
+ * 之后用普通 HTTP 调接口」——页内 fetch 受 CDP 与页面导航时序影响，不如这条路稳。
+ * @returns {Promise<{cookieHeader: string}|{wafBlocked: true}>}
  */
-export async function anyrouterSession(account) {
+export async function fetchWafCookies(account) {
   const cfg = getConfig()
   const host = new URL(account.baseUrl).hostname
   return await withPage(host, async page => {
@@ -428,61 +386,33 @@ export async function anyrouterSession(account) {
       page.setCookie({ name: 'session', value: account.token, domain: host, path: '/' }),
       15000, '注入 session cookie 超时（浏览器无响应）'
     )
-    logger.info(`[relay-checkin-plugin] 正在打开 ${account.baseUrl}`)
+    logger.info(`[relay-checkin-plugin] 正在打开 ${account.baseUrl}（取 WAF cookie）`)
     await withTimeout(
       page.goto(account.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }),
       40000, '打开站点页面超时（网络或代理不通）'
     )
-    logger.info('[relay-checkin-plugin] 站点页面已打开，等待 WAF 放行')
 
-    if (!await waitApiReady(page, account.baseUrl, cfg.browser.wafTimeoutSec || 25)) {
-      return { wafBlocked: true }
-    }
-
-    const headers = {
-      'New-Api-User': String(account.siteUserId ?? ''),
-      'X-Requested-With': 'XMLHttpRequest',
-      'Content-Type': 'application/json'
-    }
-    const checkin = await pageFetchRetry(page, `${account.baseUrl}${account.signPath || '/api/user/sign_in'}`, {
-      method: 'POST',
-      headers
-    })
-    const self = await pageFetchRetry(page, `${account.baseUrl}/api/user/self`, { headers })
-    return { checkin, self }
-  })
-}
-
-/**
- * AnyRouter 系仅查询用户信息（余额查询用）
- */
-export async function anyrouterUserInfo(account) {
-  const cfg = getConfig()
-  const host = new URL(account.baseUrl).hostname
-  return await withPage(host, async page => {
-    await withTimeout(
-      page.setCookie({ name: 'session', value: account.token, domain: host, path: '/' }),
-      15000, '注入 session cookie 超时（浏览器无响应）'
-    )
-    logger.info(`[relay-checkin-plugin] 正在打开 ${account.baseUrl}`)
-    await withTimeout(
-      page.goto(account.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }),
-      40000, '打开站点页面超时（网络或代理不通）'
-    )
-    logger.info('[relay-checkin-plugin] 站点页面已打开，等待 WAF 放行')
-
-    if (!await waitApiReady(page, account.baseUrl, cfg.browser.wafTimeoutSec || 25)) {
-      return { wafBlocked: true }
-    }
-    const self = await pageFetchRetry(page, `${account.baseUrl}/api/user/self`, {
-      headers: {
-        'New-Api-User': String(account.siteUserId ?? ''),
-        'X-Requested-With': 'XMLHttpRequest'
+    // 等 WAF 的 acw_sc__v2 出现（挑战 JS 执行完的标志）
+    const deadline = Date.now() + (cfg.browser.wafTimeoutSec || 60) * 1000
+    let cookies = []
+    while (Date.now() < deadline) {
+      try {
+        cookies = await withTimeout(page.cookies(), 8000, '取 cookie 超时')
+      } catch {
+        cookies = []
       }
-    })
-    return { self }
+      if (cookies.some(c => /^acw_sc__v2$/i.test(c.name))) break
+      await new Promise(r => setTimeout(r, 1000))
+    }
+    await logPageState(page)
+
+    if (!cookies.length) return { wafBlocked: true }
+    const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ')
+    logger.info(`[relay-checkin-plugin] 已取得 ${cookies.length} 个 cookie，改用普通 HTTP 调用接口`)
+    return { cookieHeader }
   })
 }
+
 
 /**
  * 在站点页面上下文内渲染 Cloudflare Turnstile 挑战并获取 token

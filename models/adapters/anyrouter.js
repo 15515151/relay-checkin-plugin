@@ -1,37 +1,36 @@
 import { request, parseUserInfo, parseCheckinResult } from './common.js'
-import { anyrouterSession, anyrouterUserInfo } from '../browser.js'
+import { fetchWafCookies } from '../browser.js'
 import { getConfig } from '../config.js'
 
 const WAF_MSG = 'WAF 未放行（浏览器等待超时），请稍后重试'
 
 /**
- * 解析浏览器页内 /api/user/self 结果，失败时补充状态码便于定位
- * （status 0 = 页内请求被 WAF 刷新中断；非 JSON = 可能被 WAF 拦截）
+ * WAF cookie 缓存（host -> { cookieHeader, at }）：
+ * 阿里云 WAF 的 acw_sc__v2 有效期较长，缓存后多数签到无需再开浏览器
  */
-function parseSelfWithDiag(self) {
-  const info = parseUserInfo(self?.json)
-  if (!info.ok && self && self.json == null) {
-    info.msg = self.status === 0
-      ? '页面内请求被站点刷新中断，请稍后重试'
-      : `用户信息接口未返回有效数据 (HTTP ${self.status})，可能被 WAF 拦截`
-  }
-  return info
+const wafCache = new Map()
+const WAF_TTL = 25 * 60 * 1000
+
+function getCached(host) {
+  const c = wafCache.get(host)
+  if (c && Date.now() - c.at < WAF_TTL) return c.cookieHeader
+  wafCache.delete(host)
+  return null
 }
 
 /**
  * AnyRouter 系（anyrouter.top 及同源站，带阿里云 WAF）
  * 鉴权：Cookie: session=<值> + New-Api-User: <站点用户ID>
- * 签到：POST /api/user/sign_in；纯 HTTP 会被 WAF 拦截，
- *       走无头浏览器：注入 session → 等 WAF 放行 → 页内 fetch 完成签到与查询
+ * 流程：浏览器过 WAF 取 cookie（可缓存） → 用普通 HTTP 带这些 cookie 调接口
  * 参考：dctx-team/Regular-inspection、millylee/anyrouter-check-in
  */
 export default {
   type: 'anyrouter',
   label: 'AnyRouter',
 
-  buildHeaders(account) {
+  buildHeaders(account, cookieHeader = null) {
     return {
-      Cookie: `session=${account.token}`,
+      Cookie: cookieHeader || `session=${account.token}`,
       'New-Api-User': String(account.siteUserId ?? ''),
       'X-Requested-With': 'XMLHttpRequest',
       'Content-Type': 'application/json'
@@ -39,31 +38,65 @@ export default {
   },
 
   /**
-   * 一次浏览器会话完成签到 + 用户信息查询（executor 优先调用）
+   * 取可用的 WAF cookie：优先用缓存，失效则开浏览器重新获取
+   * @returns {Promise<{ok: true, cookieHeader: string}|{ok: false, msg: string}>}
+   */
+  async ensureCookies(account, { forceRefresh = false } = {}) {
+    const host = new URL(account.baseUrl).hostname
+    if (!forceRefresh) {
+      const cached = getCached(host)
+      if (cached) return { ok: true, cookieHeader: cached }
+    }
+    if (!getConfig().browser.enable) {
+      return { ok: false, msg: '浏览器方案未启用（browser.enable），无法过 WAF' }
+    }
+    const res = await fetchWafCookies(account)
+    if (res.wafBlocked || !res.cookieHeader) return { ok: false, msg: WAF_MSG }
+    wafCache.set(host, { cookieHeader: res.cookieHeader, at: Date.now() })
+    return { ok: true, cookieHeader: res.cookieHeader }
+  },
+
+  /**
+   * 带 WAF cookie 请求接口；被 WAF 拦回（非 JSON 响应）时刷新 cookie 重试一次
+   * @returns {Promise<{status: number, json: object|null}|{failed: string}>}
+   */
+  async apiCall(account, path, method = 'GET') {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const c = await this.ensureCookies(account, { forceRefresh: attempt > 0 })
+      if (!c.ok) return { failed: c.msg }
+      const { status, json } = await request(`${account.baseUrl}${path}`, {
+        method,
+        headers: this.buildHeaders(account, c.cookieHeader)
+      })
+      // 拿到 JSON 说明已穿过 WAF；非 JSON 多为拦截页，刷新 cookie 再试
+      if (json) return { status, json }
+      if (attempt === 0) {
+        logger.info(`[relay-checkin-plugin] anyrouter ${path} 返回非 JSON (HTTP ${status})，刷新 WAF cookie 重试`)
+      } else {
+        return { failed: `接口未返回有效数据 (HTTP ${status})，可能被 WAF 拦截` }
+      }
+    }
+    return { failed: WAF_MSG }
+  },
+
+  /**
+   * 一次流程完成签到 + 用户信息查询（executor 优先调用）
    */
   async checkinWithInfo(account) {
-    logger.info(`[relay-checkin-plugin] anyrouter 开始浏览器签到会话: ${account.name}`)
-    if (!getConfig().browser.enable) {
+    logger.info(`[relay-checkin-plugin] anyrouter 开始签到: ${account.name}`)
+    const signPath = account.signPath || '/api/user/sign_in'
+    const sign = await this.apiCall(account, signPath, 'POST')
+    if (sign.failed) {
       return {
-        checkin: { ok: false, already: false, msg: '浏览器方案未启用（browser.enable），无法过 WAF' },
-        info: { ok: false, msg: '浏览器方案未启用' }
+        checkin: { ok: false, already: false, msg: sign.failed },
+        info: { ok: false, msg: sign.failed }
       }
     }
-    const session = await anyrouterSession(account)
-    if (session.wafBlocked) {
-      return {
-        checkin: { ok: false, already: false, msg: WAF_MSG },
-        info: { ok: false, msg: WAF_MSG }
-      }
-    }
-    const checkin = parseCheckinResult(session.checkin.status, session.checkin.json)
-    if (!checkin.ok && session.checkin.status === 0) {
-      checkin.msg = '页面内签到请求被站点刷新中断，请稍后重试'
-    }
-    return {
-      checkin,
-      info: parseSelfWithDiag(session.self)
-    }
+    const checkin = parseCheckinResult(sign.status, sign.json)
+
+    const self = await this.apiCall(account, '/api/user/self')
+    const info = self.failed ? { ok: false, msg: self.failed } : parseUserInfo(self.json)
+    return { checkin, info }
   },
 
   async checkin(account) {
@@ -72,25 +105,22 @@ export default {
   },
 
   async userInfo(account) {
-    // 快速试一次纯 HTTP（个别镜像站无 WAF）：短超时不重试，避免长时间静默；
-    // 只有拿到成功响应才采信，避免把 WAF 的 JSON 拦截响应误判为 session 失效
+    // 先快速试一次纯 HTTP（个别镜像站无 WAF，或缓存 cookie 已够用）
+    const cached = getCached(new URL(account.baseUrl).hostname)
     try {
       const { status, json } = await request(`${account.baseUrl}/api/user/self`, {
-        headers: this.buildHeaders(account),
+        headers: this.buildHeaders(account, cached),
         timeoutMs: 8000,
         maxRetry: 0
       })
       if (json?.success) return parseUserInfo(json)
-      // 状态码能区分：401/403=凭据问题，200 但非 JSON=WAF 拦截页，其它=站点异常
-      logger.info(`[relay-checkin-plugin] anyrouter 纯 HTTP 探测未通过 (HTTP ${status}${json ? `, message=${json.message || '无'}` : ', 非 JSON 响应'})，走浏览器方案`)
+      logger.info(`[relay-checkin-plugin] anyrouter 纯 HTTP 探测未通过 (HTTP ${status}${json ? `, message=${json.message || '无'}` : ', 非 JSON 响应'})，走浏览器取 WAF cookie`)
     } catch (err) {
-      logger.info(`[relay-checkin-plugin] anyrouter 纯 HTTP 探测失败（${err.message}），走浏览器方案`)
+      logger.info(`[relay-checkin-plugin] anyrouter 纯 HTTP 探测失败（${err.message}），走浏览器取 WAF cookie`)
     }
-    if (!getConfig().browser.enable) {
-      return { ok: false, msg: '浏览器方案未启用（browser.enable），无法过 WAF' }
-    }
-    const result = await anyrouterUserInfo(account)
-    if (result.wafBlocked) return { ok: false, msg: WAF_MSG }
-    return parseSelfWithDiag(result.self)
+
+    const res = await this.apiCall(account, '/api/user/self')
+    if (res.failed) return { ok: false, msg: res.failed }
+    return parseUserInfo(res.json)
   }
 }

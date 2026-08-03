@@ -94,6 +94,7 @@ try {
     assert.equal(res.balance, '$1.00', '签到失败也应查询余额')
   }
 
+
   // ---- 3.5 checkinEntry autoOnly：定时任务只签单账号开关打开的 ----
   routes = {
     'POST https://agentrouter.org/api/user/sign_in': { status: 200, body: { success: true, message: '签到成功' } },
@@ -177,14 +178,31 @@ try {
   assert.match(ts.msg, /site key/, '应触发降级并提示缺少 site key')
   assert.equal(ts.balance, '$1.00', '降级失败不影响余额查询')
 
-  // ---- 8. AnyRouter：无 WAF 镜像站可直接 HTTP 查询用户信息 ----
+  // ---- 8. AnyRouter：浏览器只负责取 WAF cookie，接口调用走普通 HTTP ----
   const anyrouter = (await import('../models/adapters/anyrouter.js')).default
+  const AR2 = { name: 'anyrouter.top', baseUrl: 'https://anyrouter.top', type: 'anyrouter', token: 'S', siteUserId: 8 }
+  let sentCookie = null
   routes = {
-    'GET https://anyrouter.top/api/user/self': { status: 200, body: { success: true, data: { id: 8, username: 'a', quota: 2500000, used_quota: 0 } } }
+    'GET https://anyrouter.top/api/user/self': opts => {
+      sentCookie = opts.headers?.Cookie
+      return { status: 200, body: { success: true, data: { id: 8, username: 'a', quota: 2500000, used_quota: 0 } } }
+    }
   }
-  const arInfo = await anyrouter.userInfo({ name: 'anyrouter.top', baseUrl: 'https://anyrouter.top', type: 'anyrouter', token: 'S', siteUserId: 8 })
-  assert.equal(arInfo.ok, true)
+  const arInfo = await anyrouter.userInfo(AR2)
+  assert.equal(arInfo.ok, true, '纯 HTTP 可用时不应启动浏览器')
   assert.equal(arInfo.balanceText, '$5.00')
+  assert.equal(sentCookie, 'session=S', '无 WAF cookie 缓存时直接用 session 请求')
+
+  // 被 WAF 拦回（非 JSON）且浏览器方案关闭时，应明确报原因而不是静默卡住
+  const cfgMod = await import('../models/config.js')
+  const cfgNow = cfgMod.getConfig()
+  const savedEnable = cfgNow.browser.enable
+  cfgNow.browser.enable = false
+  routes = { 'GET https://anyrouter.top/api/user/self': { status: 200, body: null } }
+  const arBlocked = await anyrouter.userInfo(AR2)
+  assert.equal(arBlocked.ok, false)
+  assert.match(arBlocked.msg, /浏览器方案未启用/)
+  cfgNow.browser.enable = savedEnable
   console.log('适配器行为 OK')
 
   // ---- 7. art-template 渲染模板（与 TRSS-Yunzai 同引擎）----
