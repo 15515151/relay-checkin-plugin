@@ -451,6 +451,15 @@ try {
   assert.ok(html.includes('凭据无效'))
 
   html = art(path.join(tplDir, 'result.html'), {
+    title: '中转站账号', subtitle: '', time: 'T', seal: { top: '账号', bottom: '已录' },
+    summaryItems, users: [{ nickname: '用户A', userId: '111', sectionMark: '壹', sectionText: '用户一', accounts: [
+      { name: 'anyrouter.top (u)', status: 'ok', statusText: '添加成功 / 签到成功', award: '', balance: '$12.30', msg: '' }
+    ] }]
+  })
+  assert.equal((html.match(/class="acc-row"/g) || []).length, 1, '绑定成功结果应将添加与签到合并为一条账号记录')
+  assert.ok(html.includes('添加成功 / 签到成功'))
+
+  html = art(path.join(tplDir, 'result.html'), {
     title: '中转站签到', subtitle: '', time: 'T', seal: { top: '签到', bottom: '已毕' },
     summaryItems, users: [users[0]]
   })

@@ -717,7 +717,7 @@ export default class RelayCheckinApp extends plugin {
   /**
    * 保存账号（同站点同站点用户ID才更新凭据，否则新增），随后立即签到一次
    * （已签会识别为今日已签，未签顺带签上，让列表的签到状态从添加起就准确），
-   * 并回复含添加与签到两条结果的图片
+   * 并把添加与签到状态合并到同一行图片中
    */
   async saveAccount(account, info, initialCheckin = null) {
     account.username = info.username || ''
@@ -743,16 +743,20 @@ export default class RelayCheckinApp extends plugin {
       }
     }
     const balance = checkinRow.balance !== '-' ? checkinRow.balance : info.balanceText
+    const mergedRow = {
+      ...checkinRow,
+      name: accountLabel(stored),
+      statusText: `${statusText} / ${checkinRow.statusText || '签到结果未知'}`,
+      balance,
+      msg: checkinRow.msg || ''
+    }
 
     const img = await renderResult({
       title: '中转站账号',
       users: [{
         nickname: entry.nickname,
         userId: entry.userId,
-        accounts: [
-          { name: accountLabel(stored), status: 'ok', statusText, award: '', balance, msg: '' },
-          checkinRow
-        ]
+        accounts: [mergedRow]
       }]
     })
     await this.replyImage(img, `${statusText}：${accountLabel(stored)}，余额 ${balance}，${checkinRow.statusText}${checkinRow.msg ? `（${checkinRow.msg}）` : ''}`)
