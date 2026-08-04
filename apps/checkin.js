@@ -144,20 +144,23 @@ function bindRecallSec() {
 }
 
 /**
- * 绑定结果回执到发起流程的群（引用原指令消息，只含非敏感信息，按配置自动撤回）
+ * 绑定结果回执到发起流程的群（引用原指令消息，只含非敏感信息）。
+ * 成功绑定可传入结果图片，此时不再安排自动撤回；文本回执仍按原配置撤回。
  */
-async function notifyBindGroup(pending, text) {
+async function notifyBindGroup(pending, text, image = null) {
   if (!pending?.groupId) return
   try {
     const bot = Bot[pending.selfId] ?? Bot
     const group = bot.pickGroup(Number(pending.groupId) || pending.groupId)
-    const res = await group.sendMsg([
+    const message = [
       segment.reply(pending.messageId),
-      segment.at(Number(pending.userId) || pending.userId),
-      ' ' + text
-    ])
+      segment.at(Number(pending.userId) || pending.userId)
+    ]
+    if (image) message.push(image)
+    else message.push(' ' + text)
+    const res = await group.sendMsg(message)
     const sec = bindRecallSec()
-    if (sec > 0 && res?.message_id) {
+    if (!image && sec > 0 && res?.message_id) {
       setTimeout(async () => {
         try {
           await group.recallMsg(res.message_id)
@@ -685,14 +688,14 @@ export default class RelayCheckinApp extends plugin {
           return
         }
 
-        const { entry, statusText, checkinRow, balance } = await this.saveAccount(r.account, r.info, r.initialCheckin)
+        const { entry, statusText, checkinRow, balance, image } = await this.saveAccount(r.account, r.info, r.initialCheckin)
         // 群里发起的绑定：保留最近使用群信息（私聊补发凭据时事件里没有群号）
         if (pending.groupId) {
           rememberGroup(entry, pending.groupId)
           persist()
         }
         await recallBindPrompt(pending)
-        await notifyBindGroup(pending, `中转站 ${accountLabel(r.account)} ${statusText}，余额 ${balance}，${checkinRow.statusText}`)
+        await notifyBindGroup(pending, `中转站 ${accountLabel(r.account)} ${statusText}，余额 ${balance}，${checkinRow.statusText}`, image)
       })
     } catch (err) {
       // 未预见的异常也要回执，否则表现为「发了凭据没反应」
@@ -717,7 +720,7 @@ export default class RelayCheckinApp extends plugin {
   /**
    * 保存账号（同站点同站点用户ID才更新凭据，否则新增），随后立即签到一次
    * （已签会识别为今日已签，未签顺带签上，让列表的签到状态从添加起就准确），
-   * 并回复含添加与签到两条结果的图片
+   * 并把添加与签到状态合并到同一行图片中
    */
   async saveAccount(account, info, initialCheckin = null) {
     account.username = info.username || ''
@@ -743,20 +746,24 @@ export default class RelayCheckinApp extends plugin {
       }
     }
     const balance = checkinRow.balance !== '-' ? checkinRow.balance : info.balanceText
+    const mergedRow = {
+      ...checkinRow,
+      name: accountLabel(stored),
+      statusText: `${statusText} / ${checkinRow.statusText || '签到结果未知'}`,
+      balance,
+      msg: checkinRow.msg || ''
+    }
 
     const img = await renderResult({
       title: '中转站账号',
       users: [{
         nickname: entry.nickname,
         userId: entry.userId,
-        accounts: [
-          { name: accountLabel(stored), status: 'ok', statusText, award: '', balance, msg: '' },
-          checkinRow
-        ]
+        accounts: [mergedRow]
       }]
     })
     await this.replyImage(img, `${statusText}：${accountLabel(stored)}，余额 ${balance}，${checkinRow.statusText}${checkinRow.msg ? `（${checkinRow.msg}）` : ''}`)
-    return { entry, statusText, checkinRow, balance }
+    return { entry, statusText, checkinRow, balance, image: img }
   }
 
   async list() {
