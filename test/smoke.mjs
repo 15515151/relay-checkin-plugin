@@ -39,6 +39,7 @@ try {
   assert.equal(cfg.browser.turnstileTimeoutSec, 30)
   assert.equal(cfg.browser.turnstileInteractive, true)
   assert.equal(cfg.browser.turnstileInteractiveTimeoutSec, 120)
+  assert.equal(cfg.browser.powTimeoutSec, 120)
   assert.equal(cfg.bind.timeoutSec, 300)
   assert.equal(cfg.bind.groupRecallSec, 60)
   assert.equal(cfg.proxy.url, '')
@@ -151,8 +152,8 @@ try {
       turnstileInteractive: false,
       turnstileInteractiveTimeoutSec: 600
     }),
-    450000,
-    '关闭可见接管时不应计入第二次排队和交互等待'
+    540000,
+    '关闭可见接管时应覆盖无头 Turnstile/POW 验证与启动余量'
   )
   let publicBypass = null
   assert.equal(
@@ -362,7 +363,7 @@ try {
   console.log('browser profile OK')
 
   // ---- adapters/common ----
-  const { quotaToUsd, parseUserInfo, parseCheckinResult, deriveAwardQuota, matchProxy } = await import('../models/adapters/common.js')
+  const { quotaToUsd, parseUserInfo, parseCheckinResult, classifyValidation, deriveAwardQuota, matchProxy } = await import('../models/adapters/common.js')
   // 代理域名匹配：hosts 关键字包含匹配；空数组 = 全部走代理；未配置 url = 不走
   const P = 'http://127.0.0.1:7890'
   assert.equal(matchProxy('anyrouter.top', { url: P, hosts: ['anyrouter'] }), P)
@@ -394,6 +395,10 @@ try {
   assert.deepEqual([r.ok, r.already], [true, true])
   r = parseCheckinResult(200, { success: false, message: 'Turnstile token 为空' })
   assert.match(r.msg, /Turnstile/)
+  assert.equal(classifyValidation({ message: '需要完成安全验证' }), 'pow')
+  r = parseCheckinResult(403, { success: false, code: 'VERIFICATION_REQUIRED', message: '需要完成安全验证' })
+  assert.equal(r.validation, 'pow')
+  assert.match(r.msg, /POW/)
   r = parseCheckinResult(404, null)
   assert.match(r.msg, /签到接口/)
   r = parseCheckinResult(302, null)
@@ -406,6 +411,10 @@ try {
   assert.equal(r.ok, true)
   r = parseCheckinResult(403, null, { textSnippet: '<title>Access Verification</title> aliyun_waf' })
   assert.match(r.msg, /WAF/)
+  r = parseCheckinResult(522, null)
+  assert.match(r.msg, /源服务器无响应/)
+  r = parseCheckinResult(0, null, { error: '请求超时（15 秒）' })
+  assert.match(r.msg, /请求超时/)
   assert.equal(deriveAwardQuota(
     { quota: 1000000, usedQuota: 100000 },
     { quota: 1200000, usedQuota: 400000 }
@@ -471,6 +480,8 @@ try {
   const veloeraMod = (await import('../models/adapters/veloera.js')).default
   assert.equal(newapiMod.checkinPath, '/api/user/checkin')
   assert.equal(veloeraMod.checkinPath, '/api/user/check_in')
+  const validationHeaders = newapiMod.buildValidationHeaders({ token: 'T', siteUserId: 1 })
+  assert.ok(validationHeaders['X-Game-Action-Id'] && validationHeaders['X-Game-Body-SHA256'], 'POW 签到应带网页完整性标记')
   console.log('adapter headers OK')
 
   // ---- store（仅用户隔离 + 同站多账号）----
@@ -666,43 +677,50 @@ try {
 
   // ---- 指令正则（与 apps/checkin.js 保持一致）----
   const rules = {
-    help: /^#中转(站)?(帮助|help)$/,
-    addEmail: /^#中转添加邮箱\s+\S+(?:\s+\S+)*$/,
-    addCookie: /^#中转添加[cC]ookie\s+\S+(?:\s+\S+)*$/,
-    add: /^#中转添加\s+\S+(?:\s+\S+)*$/,
-    list: /^#中转列表$/,
-    remove: /^#中转删除\s*(\d+)$/,
-    checkin: /^#中转签到\s*(\d+)?$/,
-    query: /^#中转查询$/,
-    toggle: /^#中转定时\s*(开|关)\s*(\d+)?$/,
-    pushToggle: /^#中转(开启|关闭)(定时(签到)?)?群推送$/,
-    bindPrefixed: /^[#＃/\\]?\s*中转绑定/,
+    help: /^#中转(?:站)?(帮助|help)$/,
+    addEmail: /^#中转(?:站)?添加邮箱\s+\S+(?:\s+\S+)*$/,
+    addCookie: /^#中转(?:站)?添加[cC]ookie\s+\S+(?:\s+\S+)*$/,
+    add: /^#中转(?:站)?添加\s+\S+(?:\s+\S+)*$/,
+    list: /^#中转(?:站)?列表$/,
+    remove: /^#中转(?:站)?删除\s*(\d+)$/,
+    checkin: /^#中转(?:站)?签到\s*(\d+)?$/,
+    query: /^#中转(?:站)?查询$/,
+    toggle: /^#中转(?:站)?定时\s*(开|关)\s*(\d+)?$/,
+    pushToggle: /^#中转(?:站)?(开启|关闭)(定时(签到)?)?群推送$/,
+    bindPrefixed: /^[#＃/\\]?\s*中转(?:站)?绑定/,
     bind: /^[\s\S]+$/
   }
   assert.ok(rules.help.test('#中转帮助') && rules.help.test('#中转站help'))
   assert.ok(rules.addEmail.test('#中转添加邮箱 agentrouter.org'))
+  assert.ok(rules.addEmail.test('#中转站添加邮箱 agentrouter.org'), '中转站前缀应兼容邮箱绑定')
   assert.ok(rules.addEmail.test('#中转添加邮箱 agentrouter.org user@example.com password'))
   assert.ok(rules.add.test('#中转添加 https://x.com abc'))
   assert.ok(rules.add.test('#中转添加 x.com abc 123'))
   assert.ok(rules.add.test('#中转添加 x.com'), '仅地址应命中（发起私聊绑定流程）')
+  assert.ok(rules.add.test('#中转站添加 x.com'), '中转站前缀应兼容添加指令')
   assert.ok(rules.add.test('#中转添加 x.com abc 123 多余参数'), '参数过多也应命中，以便撤回并提示')
   assert.ok(!rules.add.test('#中转添加cookie x.com s 1'), 'addCookie 消息不应命中 add 规则')
   assert.ok(rules.addCookie.test('#中转添加cookie x.com sess 1'))
+  assert.ok(rules.addCookie.test('#中转站添加cookie x.com sess 1'), '中转站前缀应兼容 Cookie 绑定')
   assert.ok(rules.addCookie.test('#中转添加Cookie x.com sess 1'))
   assert.ok(rules.addCookie.test('#中转添加cookie x.com'), '仅地址应命中（发起私聊绑定流程）')
   assert.ok(rules.addCookie.test('#中转添加cookie x.com sess'), '缺用户ID也应命中，由处理器提示补全')
   assert.ok(rules.addCookie.test('#中转添加cookie x.com sess 1 多余'), '参数过多也应命中，以便撤回并提示')
   assert.ok(rules.checkin.test('#中转签到') && rules.checkin.test('#中转签到 2') && rules.checkin.test('#中转签到2'))
+  assert.ok(rules.checkin.test('#中转站签到 2'), '中转站前缀应兼容指定序号签到')
+  assert.ok(rules.list.test('#中转站列表') && rules.remove.test('#中转站删除3') && rules.query.test('#中转站查询'), '中转站前缀应兼容列表/删除/查询')
   assert.ok(rules.remove.test('#中转删除 1') && rules.remove.test('#中转删除3'))
   assert.ok(rules.toggle.test('#中转定时 开') && rules.toggle.test('#中转定时关'))
   assert.ok(rules.toggle.test('#中转定时 关 2') && rules.toggle.test('#中转定时开1'), '带序号的单账号定时开关应命中')
+  assert.ok(rules.toggle.test('#中转站定时开1'), '中转站前缀应兼容定时开关')
   assert.ok(rules.pushToggle.test('#中转开启群推送') && rules.pushToggle.test('#中转关闭群推送'))
   assert.ok(rules.pushToggle.test('#中转开启定时签到群推送'), '长格式应兼容')
+  assert.ok(rules.pushToggle.test('#中转站关闭群推送'), '中转站前缀应兼容群推送开关')
   assert.ok(!rules.pushToggle.test('#中转群推送'), '无开启/关闭动词不应命中')
   assert.ok(rules.bind.test('sess-value 12345'), '兜底规则应命中普通私聊消息')
   assert.ok(rules.bind.test('/xgyToken+abc= 250'), '/ 开头的凭据也应命中（核心会归一化首字符，处理器按原文解析）')
   assert.ok(rules.bind.test('#中转列表'), '兜底规则命中指令没关系，处理器按原文首字符放行')
-  assert.ok(rules.bindPrefixed.test('中转绑定 tok') && rules.bindPrefixed.test('#中转绑定 tok'), 'disableAdopt 放行用的前缀格式应命中')
+  assert.ok(rules.bindPrefixed.test('中转绑定 tok') && rules.bindPrefixed.test('#中转绑定 tok') && rules.bindPrefixed.test('#中转站绑定 tok'), 'disableAdopt 放行用的前缀格式应命中')
   assert.ok(rules.bindPrefixed.test('/中转绑定 tok'), '/ 被归一化前的原文也应识别为前缀格式')
   console.log('指令正则 OK')
 

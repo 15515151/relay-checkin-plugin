@@ -1,6 +1,6 @@
 import { getAdapter } from './adapters/index.js'
-import { quotaToUsd, request, parseCheckinResult, deriveAwardQuota } from './adapters/common.js'
-import { turnstileCheckin } from './browser.js'
+import { quotaToUsd, request, parseCheckinResult, classifyValidation, deriveAwardQuota } from './adapters/common.js'
+import { powCheckin, turnstileCheckin } from './browser.js'
 import { getConfig } from './config.js'
 import { accountLabel, persist } from './store.js'
 
@@ -28,16 +28,19 @@ const STATUS_TEXT = { ok: '签到成功', already: '今日已签', unknown: '签
  * 不能把所有「完整性 / 请刷新」错误误报成 Turnstile。
  */
 function needsBrowser(msg) {
-  return /turnstile|人机|验证码|captcha|访问验证|checking your browser/i.test(String(msg || ''))
+  return /turnstile|人机|验证码|captcha|访问验证|checking your browser|安全验证|verification_required|pow[_ -]?shield|proof.?of.?work/i.test(String(msg || ''))
 }
 
 /**
  * Turnstile 站点浏览器降级签到：取 site key → 页面内过挑战 → 带 token 重调签到接口
  */
-async function turnstileFallback(account, adapter) {
+async function turnstileFallback(account, adapter, checkinPath = adapter.checkinPath) {
+  const headers = adapter.buildHeaders(account)
   let siteKey = null
   try {
-    const { json } = await request(`${account.baseUrl}/api/status`)
+    const { json } = await request(`${account.baseUrl}/api/status`, {
+      headers
+    })
     siteKey = json?.data?.turnstile_site_key || null
   } catch {
     // 取不到 site key 走下方统一失败
@@ -47,18 +50,35 @@ async function turnstileFallback(account, adapter) {
   }
 
   const res = await turnstileCheckin(account, {
-    checkinPath: adapter.checkinPath,
-    headers: adapter.buildHeaders(account),
+    checkinPath,
+    headers,
+    validationHeaders: adapter.buildValidationHeaders?.(account) || headers,
     siteKey
   })
   if (res.turnstileFailed) {
     return { ok: false, already: false, msg: res.message || 'Turnstile 挑战未通过（站点可能要求交互验证）' }
   }
   const parsed = parseCheckinResult(res.status, res.json, res)
-  if (!parsed.ok && needsBrowser(parsed.msg)) {
+  if (!parsed.ok && parsed.validation === 'turnstile') {
     parsed.msg = `${parsed.msg}（浏览器方案已重试，站点可能要求交互式验证）`
   }
   return parsed
+}
+
+/**
+ * NewAPI POW-Shield 浏览器签到：挑战、计算和 POST 必须留在同一个页面上下文。
+ */
+async function powFallback(account, adapter, checkinPath = adapter.checkinPath) {
+  const headers = adapter.buildHeaders(account)
+  const res = await powCheckin(account, {
+    checkinPath,
+    headers,
+    validationHeaders: adapter.buildValidationHeaders?.(account) || headers
+  })
+  if (res.powFailed) {
+    return { ok: false, already: false, uncertain: Boolean(res.uncertain), validation: 'pow', msg: res.message || 'POW 安全验证未完成' }
+  }
+  return parseCheckinResult(res.status, res.json, res)
 }
 
 async function readCheckinStatus(adapter, account) {
@@ -124,9 +144,20 @@ export async function checkinAccount(account) {
           r = { ok: false, already: false, uncertain: true, msg: err?.message || String(err) }
         }
         // 站点要求人机验证且浏览器方案可用时，自动降级为浏览器签到
-        if (!r.ok && needsBrowser(r.msg) && adapter.checkinPath && getConfig().browser.enable) {
-          logger.info(`[relay-checkin-plugin] ${account.name} 需人机验证，尝试浏览器方案`)
-          r = await turnstileFallback(account, adapter)
+        const validation = r?.validation || classifyValidation({ message: r?.msg })
+        const browserCheckinPath = account.signPath || adapter.checkinPath
+        if (!r.ok && browserCheckinPath && getConfig().browser.enable && (validation || needsBrowser(r.msg))) {
+          if (validation === 'pow' || /安全验证|pow[_ -]?shield|proof.?of.?work/i.test(r.msg || '')) {
+            logger.info(`[relay-checkin-plugin] ${account.name} 需 POW 安全验证，尝试浏览器方案`)
+            try {
+              r = await powFallback(account, adapter, browserCheckinPath)
+            } catch (err) {
+              r = { ok: false, already: false, validation: 'pow', msg: `POW 浏览器方案失败：${err?.message || err}` }
+            }
+          } else if (validation === 'turnstile' || (!validation && needsBrowser(r.msg))) {
+            logger.info(`[relay-checkin-plugin] ${account.name} 需人机验证，尝试浏览器方案`)
+            r = await turnstileFallback(account, adapter, browserCheckinPath)
+          }
         }
       }
 

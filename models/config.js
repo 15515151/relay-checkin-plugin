@@ -54,6 +54,8 @@ const DEFAULT_CONFIG = {
     turnstileTimeoutSec: 30,
     turnstileInteractive: true,
     turnstileInteractiveTimeoutSec: 120,
+    // NewAPI POW-Shield 计算与提交的最长时间（秒）
+    powTimeoutSec: 120,
     idleCloseSec: 300,
     maxConcurrentPages: 2,
     slotWaitSec: 120

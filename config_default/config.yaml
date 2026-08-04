@@ -39,7 +39,7 @@ security:
   # 默认禁止本机/内网/链路本地地址；确需访问私有站点时填写精确域名或 *.example.com
   allowedPrivateHosts: []
 
-# 浏览器方案（AnyRouter 过阿里云 WAF、Turnstile 站点自动降级签到）
+# 浏览器方案（AnyRouter 过阿里云 WAF、Turnstile/POW 站点自动降级签到）
 browser:
   enable: true
   # 浏览器程序路径；留空时自动选择版本最高的系统 Chrome/Edge，找不到才使用 Puppeteer 自带 Chromium
@@ -54,6 +54,8 @@ browser:
   turnstileInteractive: true
   # 等待可见浏览器完成 Turnstile 的最长时间（秒），范围 30~600
   turnstileInteractiveTimeoutSec: 120
+  # NewAPI POW-Shield 计算并提交签到的最长时间（秒），范围 15~300
+  powTimeoutSec: 120
   # 浏览器空闲多久后自动关闭（秒）
   idleCloseSec: 300
   # 全局同时打开的浏览器页面上限（每页约数十 MB 内存），超出的任务排队；上限 10
