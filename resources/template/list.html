@@ -3,79 +3,218 @@
 <head>
 <meta charset="utf-8">
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    width: 640px;
-    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
-    background: linear-gradient(160deg, #1b1f30 0%, #232a42 100%);
-    padding: 28px;
-    color: #e8eaf2;
+  :root {
+    --ink: #19251f;
+    --muted: #748179;
+    --jade: #08795e;
+    --jade-soft: #e7f1ec;
+    --vermilion: #c83f30;
+    --gold: #b58a2d;
+    --line: #cdd5d0;
+    --paper: #f6f8f5;
   }
-  .header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 4px; }
+  * { margin: 0; padding: 0; box-sizing: border-box; letter-spacing: 0; }
+  html, body { margin: 0; padding: 0; background: transparent; }
+  #container {
+    width: 800px;
+    position: relative;
+    overflow: hidden;
+    padding: 39px 43px 29px;
+    color: var(--ink);
+    background: var(--paper);
+    font-family: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
+  }
+  #container::before,
+  #container::after {
+    content: "";
+    position: absolute;
+    width: 90px;
+    height: 90px;
+    pointer-events: none;
+    border-color: var(--jade);
+    border-style: solid;
+    opacity: 0.34;
+  }
+  #container::before { left: 18px; top: 18px; border-width: 2px 0 0 2px; }
+  #container::after { right: 18px; bottom: 18px; border-width: 0 2px 2px 0; }
+  .header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 90px;
+    gap: 22px;
+    align-items: start;
+    padding: 9px 6px 24px;
+    border-bottom: 1px solid var(--ink);
+  }
+  .kicker { color: var(--jade); font: 13px Consolas, monospace; }
   .title {
-    font-size: 26px; font-weight: bold;
-    background: linear-gradient(90deg, #7ab8ff, #b48cff);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-  }
-  .time { font-size: 13px; color: #8a92ad; }
-  .meta { font-size: 13px; color: #8a92ad; margin-bottom: 14px; }
-  .meta b { color: #d5d9e8; font-weight: normal; }
-  .acc-card {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 12px;
-    padding: 14px 16px;
     margin-top: 10px;
+    font-family: "Noto Serif SC", "Source Han Serif SC", "SimSun", serif;
+    font-size: 36px;
+    font-weight: 800;
+    line-height: 1.18;
   }
-  .acc-line1 { display: flex; align-items: center; }
-  .acc-index {
-    width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0;
-    background: linear-gradient(135deg, #7ab8ff, #b48cff);
-    color: #1b1f30; font-size: 13px; font-weight: bold;
-    display: flex; align-items: center; justify-content: center;
+  .subtitle { margin-top: 8px; color: var(--muted); font-size: 14px; }
+  .seal {
+    width: 78px;
+    height: 78px;
+    display: grid;
+    place-items: center;
+    align-content: center;
+    color: var(--vermilion);
+    border: 3px double var(--vermilion);
+    transform: rotate(-4deg);
+    font-family: "Noto Serif SC", "SimSun", serif;
+    font-size: 19px;
+    font-weight: 800;
+    line-height: 1.15;
   }
-  .acc-name { font-size: 15px; font-weight: bold; color: #ffffff; margin-left: 10px; flex: 1; }
-  .acc-type {
-    font-size: 12px; padding: 2px 10px; border-radius: 20px;
-    background: rgba(122, 184, 255, 0.14); color: #7ab8ff;
+  .seal small { margin-top: 4px; font: 11px Consolas, monospace; }
+  .owner-strip {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 160px 142px;
+    margin-top: 16px;
+    border-top: 6px solid var(--jade);
+    border-bottom: 1px solid var(--line);
   }
-  .acc-line2 { font-size: 12px; color: #8a92ad; margin: 8px 0 0 34px; word-break: break-all; }
-  .acc-line3 { display: flex; gap: 8px; margin: 8px 0 0 34px; }
-  .chip { font-size: 12px; padding: 2px 10px; border-radius: 20px; background: rgba(255, 255, 255, 0.06); color: #b9bfd3; }
-  .chip.balance { background: rgba(122, 184, 255, 0.14); color: #7ab8ff; }
-  .chip.on  { background: rgba(46, 204, 113, 0.16); color: #4cd98a; }
-  .chip.off { background: rgba(255, 255, 255, 0.06); color: #8a92ad; }
-  .empty { text-align: center; color: #8a92ad; font-size: 14px; padding: 30px 0; }
-  .footer { margin-top: 18px; text-align: center; font-size: 12px; color: #5b6379; }
+  .owner-cell { min-height: 80px; padding: 13px 14px; border-right: 1px solid var(--line); }
+  .owner-cell:last-child { border-right: 0; }
+  .owner-label { color: var(--muted); font-size: 13px; }
+  .owner-name { margin-top: 4px; overflow-wrap: anywhere; font-family: "Noto Serif SC", "SimSun", serif; font-size: 18px; font-weight: 800; }
+  .owner-id { color: var(--muted); font: 13px Consolas, monospace; }
+  .owner-value { display: flex; align-items: baseline; gap: 6px; margin-top: 4px; }
+  .owner-value b { color: var(--jade); font-family: "Noto Serif SC", "SimSun", serif; font-size: 25px; line-height: 1; }
+  .owner-value span { color: var(--muted); font-size: 13px; }
+  .owner-switch { margin-top: 6px; color: var(--jade); font-size: 14px; font-weight: 700; }
+  .owner-switch::before { content: "◆"; margin-right: 6px; font-size: 8px; }
+  .account-list { margin-top: 5px; }
+  .account {
+    display: grid;
+    grid-template-columns: 54px minmax(0, 1fr);
+    gap: 14px;
+    padding: 20px 4px 18px;
+    border-bottom: 1px solid var(--line);
+  }
+  .account-mark {
+    padding-top: 2px;
+    color: var(--vermilion);
+    font-family: "Noto Serif SC", "SimSun", serif;
+    font-size: 28px;
+    line-height: 1;
+  }
+  .account-mark small { display: block; margin-top: 6px; color: var(--muted); font-family: "Noto Sans SC", sans-serif; font-size: 12px; white-space: nowrap; }
+  .account-main { min-width: 0; }
+  .account-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: baseline; }
+  .account-name { min-width: 0; overflow-wrap: anywhere; font-family: "Noto Serif SC", "SimSun", serif; font-size: 18px; font-weight: 800; line-height: 1.35; }
+  .account-type { color: var(--jade); font: 13px Consolas, monospace; font-weight: 700; white-space: nowrap; }
+  .account-url { margin-top: 6px; color: var(--muted); font: 13px Consolas, monospace; line-height: 1.55; overflow-wrap: anywhere; }
+  .metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 14px; border-top: 1px solid var(--line); }
+  .metric { min-width: 0; padding: 10px 11px 0 0; border-right: 1px solid var(--line); }
+  .metric:not(:first-child) { padding-left: 13px; }
+  .metric:last-child { border-right: 0; }
+  .metric-label { color: var(--muted); font-size: 13px; }
+  .metric-value { margin-top: 4px; font-size: 15px; font-weight: 700; overflow-wrap: anywhere; }
+  .metric-value.balance { color: var(--ink); font: 15px Consolas, monospace; font-weight: 700; }
+  .metric-value.on { color: var(--jade); }
+  .metric-value.warn { color: var(--gold); }
+  .metric-value.off { color: var(--muted); }
+  .empty {
+    margin: 23px 0 6px;
+    padding: 35px 23px;
+    color: var(--muted);
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    text-align: center;
+    font-size: 15px;
+  }
+  .empty b { display: block; margin-bottom: 6px; color: var(--vermilion); font-family: "Noto Serif SC", "SimSun", serif; font-size: 23px; }
+  .action-hint {
+    display: grid;
+    grid-template-columns: 65px minmax(0, 1fr);
+    margin-top: 18px;
+    color: #365a4c;
+    background: var(--jade-soft);
+    border-right: 4px solid var(--jade);
+  }
+  .action-mark {
+    display: grid;
+    place-items: center;
+    color: #fff;
+    background: var(--jade);
+    font-family: "Noto Serif SC", "SimSun", serif;
+    font-size: 16px;
+    font-weight: 800;
+  }
+  .action-text { padding: 11px 15px; font-size: 14px; line-height: 1.6; }
+  .action-text b { color: var(--ink); font: 14px Consolas, monospace; }
+  .footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-top: 24px;
+    padding: 11px 4px 0;
+    color: var(--muted);
+    border-top: 1px solid var(--line);
+    font: 12px Consolas, monospace;
+  }
+  .footer b { color: var(--jade); font-family: "Noto Serif SC", "SimSun", serif; font-size: 13px; }
 </style>
 </head>
 <body>
-  <div class="header">
-    <div class="title">我的中转站账号</div>
-    <div class="time">{{time}}</div>
+<main id="container">
+  <header class="header">
+    <div>
+      <div class="kicker">RELAY CHECK-IN · ACCOUNT LEDGER</div>
+      <h1 class="title">我的中转站账号</h1>
+      <div class="subtitle">余额、签到确认状态与定时安排 · {{time}}</div>
+    </div>
+    <div class="seal">账号<br>簿册<small>RELAY</small></div>
+  </header>
+
+  <div class="owner-strip">
+    <div class="owner-cell">
+      <div class="owner-label">簿册所属</div>
+      <div class="owner-name">{{nickname}}</div>
+      <div class="owner-id">QQ {{userId}}</div>
+    </div>
+    <div class="owner-cell">
+      <div class="owner-label">登记站点</div>
+      <div class="owner-value"><b>{{accountCountMark || accountCount}}</b><span>{{accountCount}} 个</span></div>
+    </div>
+    <div class="owner-cell">
+      <div class="owner-label">每日定时</div>
+      <div class="owner-switch">{{autoText}}</div>
+    </div>
   </div>
-  <div class="meta"><b>{{nickname}}</b> ({{userId}}) · 定时签到总开关：<b>{{autoText}}</b></div>
 
   {{if accounts.length === 0}}
-  <div class="empty">暂无账号，发送 #中转帮助 查看添加方法</div>
+  <div class="empty"><b>暂无账号登记</b>发送 #中转帮助 查看账号添加方法</div>
   {{/if}}
 
-  {{each accounts acc}}
-  <div class="acc-card">
-    <div class="acc-line1">
-      <div class="acc-index">{{acc.index}}</div>
-      <div class="acc-name">{{acc.name}}</div>
-      <div class="acc-type">{{acc.typeLabel}}</div>
-    </div>
-    <div class="acc-line2">{{acc.baseUrl}} · 令牌 {{acc.tokenMasked}}</div>
-    <div class="acc-line3">
-      <span class="chip balance">余额 {{acc.balance}}</span>
-      <span class="chip {{acc.checkinClass}}">{{acc.checkinText}}</span>
-      <span class="chip {{acc.autoClass}}">{{acc.autoText}}</span>
-    </div>
+  <div class="account-list">
+    {{each accounts acc}}
+    <section class="account">
+      <div class="account-mark">{{acc.indexMark || acc.index}}<small>{{acc.indexText || '账号'}} · {{acc.index}}</small></div>
+      <div class="account-main">
+        <div class="account-head"><span class="account-name">{{acc.name}}</span><span class="account-type">{{acc.typeLabel}}</span></div>
+        <div class="account-url">{{acc.baseUrl}} · {{acc.credentialLabel || '令牌'}} {{acc.credentialMasked || acc.tokenMasked}}</div>
+        <div class="metrics">
+          <div class="metric"><div class="metric-label">可用余额</div><div class="metric-value balance">余额 {{acc.balance}}</div></div>
+          <div class="metric"><div class="metric-label">今日状态</div><div class="metric-value {{acc.checkinClass}}">{{acc.checkinText}}</div></div>
+          <div class="metric"><div class="metric-label">自动签到</div><div class="metric-value {{acc.autoClass}}">{{acc.autoText}}</div></div>
+        </div>
+      </div>
+    </section>
+    {{/each}}
   </div>
-  {{/each}}
 
-  <div class="footer">relay-checkin-plugin · TRSS-Yunzai</div>
+  {{if accounts.length}}
+  <div class="action-hint">
+    <div class="action-mark">单签</div>
+    <div class="action-text">单独签到某个账号：<b>#中转签到 序号</b>　全部签到：<b>#中转签到</b></div>
+  </div>
+  {{/if}}
+
+  <footer class="footer"><b>中转站账号簿</b><span>relay-checkin-plugin · TRSS-Yunzai</span></footer>
+</main>
 </body>
 </html>

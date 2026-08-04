@@ -1,8 +1,9 @@
 import { getConfig } from './config.js'
-import { allEntries, isPushGroup, groupCandidates } from './store.js'
+import { allEntries, getPushGroups } from './store.js'
 import { checkinEntry, sleep, randInt } from './executor.js'
 import { renderResult, renderResultPages } from './render.js'
 import { withUserLock } from './lock.js'
+import { buildGroupPushPlan } from './push-plan.js'
 
 let running = false
 
@@ -88,17 +89,9 @@ function getBot(selfId) {
 }
 
 /**
- * 该用户结果要推送到的所有群：他用过的群里凡是开启了推送的都推一份
- * （签到本身仍只执行一次，这里只是把同一份结果分发到多个群）
- */
-function pickPushGroups(entry) {
-  return groupCandidates(entry).filter(gid => isPushGroup(gid))
-}
-
-/**
  * 按配置推送签到结果。
- * group 模式：推送到该用户用过且已开启推送的每一个群；
- * 一个群都没推成功（无已开启的群/已退群/发送失败）时私聊兜底，
+ * group 模式：将全部签到结果推送到 push_groups.json 中的每一个群；
+ * 一个群都没推成功（未配置目标群/机器人已退群/发送失败）时私聊兜底，
  * 保证签到执行了就一定尝试过通知，不会静默丢弃
  */
 async function pushResults(done, cfg) {
@@ -113,41 +106,24 @@ async function pushResults(done, cfg) {
     return
   }
 
-  // 同一个群内的多个用户合并成一次推送；同一用户出现在多个已开启的群里则各推一份
-  const groups = new Map()
-  for (const item of done) {
-    for (const groupId of pickPushGroups(item.entry)) {
-      const gk = `${item.entry.selfId}:${groupId}`
-      if (!groups.has(gk)) {
-        groups.set(gk, { selfId: item.entry.selfId, groupId, items: [] })
-      }
-      groups.get(gk).items.push(item)
-    }
+  const targetGroups = getPushGroups()
+  if (targetGroups.length) {
+    logger.info(`[relay-checkin-plugin] 群推送目标: ${targetGroups.join(', ')}`)
+  } else {
+    logger.info('[relay-checkin-plugin] 未配置群推送目标，结果将改为私聊')
   }
+
+  // 同一机器人名下的全部用户合并推送到每个固定目标群。
+  // 多机器人仍分别使用账号数据所属的机器人发送，避免跨机器人选错发送身份。
+  const groups = buildGroupPushPlan(done, targetGroups)
 
   // 至少成功推送到一个群的用户，不再私聊兜底
   const delivered = new Set()
-  for (const { selfId, groupId, items } of groups.values()) {
+  for (const { selfId, groupId, items } of groups) {
     try {
       const bot = getBot(selfId)
       const group = bot.pickGroup(Number(groupId) || groupId)
-
-      // 过滤已退群的用户；群里已无绑定用户则整群跳过
-      let members = null
-      try {
-        members = await group.getMemberMap()
-      } catch {
-        // 成员列表取不到（协议端不支持/临时失败）时不做过滤，交给发送环节兜底
-      }
-      const present = members
-        ? items.filter(it => members.has(Number(it.entry.userId)) || members.has(String(it.entry.userId)))
-        : items
-      if (!present.length) {
-        logger.info(`[relay-checkin-plugin] 群 ${groupId} 内已无绑定用户，跳过推送`)
-        continue
-      }
-
-      const users = present.map(toUserBlock)
+      const users = items.map(toUserBlock)
       // 每张图最多 usersPerImage 个用户，超出分页成多张图合并转发
       const images = await renderResultPages({ title: '中转站定时签到', users })
       if (!images.length) continue
@@ -162,19 +138,18 @@ async function pushResults(done, cfg) {
         ? await group.makeForwardMsg(nodes)
         : await Bot.makeForwardMsg(nodes)
       await group.sendMsg(forward)
-      for (const it of present) delivered.add(it.entry.userId)
+      logger.info(`[relay-checkin-plugin] 群 ${groupId} 推送成功，共 ${items.length} 个用户`)
+      for (const it of items) delivered.add(it.entry.userId)
     } catch (err) {
       logger.error(`[relay-checkin-plugin] 群 ${groupId} 推送失败: ${err?.message || err}`)
     }
     await sleep(2000)
   }
 
-  // 私聊兜底：一个群都没推成功的用户（含只私聊用过插件的用户）
+  // 私聊兜底：一个固定目标群都没推成功的用户
   for (const item of done) {
     if (delivered.has(item.entry.userId)) continue
-    if (groupCandidates(item.entry).length) {
-      logger.info(`[relay-checkin-plugin] 用户 ${item.entry.userId} 未能推送到任何群，改为私聊`)
-    }
+    logger.info(`[relay-checkin-plugin] 用户 ${item.entry.userId} 未能推送到任何群，改为私聊`)
     await pushPrivate(item)
     await sleep(1500)
   }

@@ -1,4 +1,50 @@
+import { createHash, randomUUID } from 'node:crypto'
+import os from 'node:os'
 import { request, parseUserInfo, parseCheckinResult } from './common.js'
+import { getConfig } from '../config.js'
+
+const integritySessions = new Map()
+
+function sha256(value) {
+  return createHash('sha256').update(String(value)).digest('hex')
+}
+
+function integritySession(account) {
+  const key = `${account.baseUrl}|${account.siteUserId ?? ''}`
+  let session = integritySessions.get(key)
+  if (!session) {
+    session = { id: randomUUID(), seq: 0 }
+    integritySessions.set(key, session)
+  }
+  return session
+}
+
+/**
+ * 部分 NewAPI 魔改站会给写请求校验网页端生成的 X-Game-* 完整性头。
+ * 首次请求明确返回「缺少完整性标记」后，按其公开网页实现补齐再重发。
+ */
+function gameIntegrityHeaders(account, body = '') {
+  const session = integritySession(account)
+  const userAgent = getConfig().request.userAgent || ''
+  const platform = /windows/i.test(userAgent) ? 'Win32' : (process.platform === 'darwin' ? 'MacIntel' : 'Linux x86_64')
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'
+  const concurrency = typeof os.availableParallelism === 'function' ? os.availableParallelism() : (os.cpus()?.length || 4)
+  const fingerprint = [userAgent, 'zh-CN', platform, timeZone, String(concurrency), '8'].join('|')
+  session.seq++
+  return {
+    'X-Game-Action-Id': randomUUID(),
+    'X-Game-Client-Ts': String(Date.now()),
+    'X-Game-Session-Id': session.id,
+    'X-Game-Client-Seq': String(session.seq),
+    'X-Game-Client-Fingerprint': sha256(fingerprint),
+    'X-Game-Body-SHA256': sha256(body)
+  }
+}
+
+function needsGameIntegrity(json) {
+  const msg = json?.message || json?.msg || json?.error?.message || ''
+  return /完整性标记|X-Game-|game.?integrity/i.test(String(msg))
+}
 
 /**
  * new-api（QuantumNous/new-api 及多数同源魔改）
@@ -9,6 +55,7 @@ export default {
   type: 'newapi',
   label: 'new-api',
   checkinPath: '/api/user/checkin',
+  compareBalance: true,
 
   buildHeaders(account) {
     const headers = {
@@ -27,11 +74,45 @@ export default {
     return parseUserInfo(json)
   },
 
+  async getCheckinStatus(account) {
+    const now = new Date()
+    const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+    const today = `${month}-${String(now.getDate()).padStart(2, '0')}`
+    const res = await request(`${account.baseUrl}/api/user/checkin?month=${month}`, {
+      headers: this.buildHeaders(account)
+    })
+    if (res.status === 404) return { supported: false }
+    const stats = res.json?.data?.stats
+    if (!res.json?.success || typeof stats?.checked_in_today !== 'boolean') {
+      return { supported: true, ok: false, msg: res.json?.message || res.json?.msg || `签到状态查询失败 (HTTP ${res.status})` }
+    }
+    const todayRecord = Array.isArray(stats.records)
+      ? stats.records.find(record => record?.checkin_date === today)
+      : null
+    return {
+      supported: true,
+      ok: true,
+      checked: stats.checked_in_today,
+      awardQuota: todayRecord?.quota_awarded ?? null
+    }
+  },
+
   async checkin(account) {
-    const { status, json } = await request(`${account.baseUrl}/api/user/checkin`, {
+    const url = `${account.baseUrl}/api/user/checkin`
+    let res = await request(url, {
       method: 'POST',
       headers: this.buildHeaders(account)
     })
-    return parseCheckinResult(status, json)
+    if (needsGameIntegrity(res.json)) {
+      logger.info(`[relay-checkin-plugin] ${account.name} 要求网页完整性标记，补齐 X-Game-* 请求头后重试`)
+      res = await request(url, {
+        method: 'POST',
+        headers: {
+          ...this.buildHeaders(account),
+          ...gameIntegrityHeaders(account)
+        }
+      })
+    }
+    return parseCheckinResult(res.status, res.json, res)
   }
 }

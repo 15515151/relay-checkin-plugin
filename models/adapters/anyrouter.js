@@ -1,4 +1,4 @@
-import { request, parseUserInfo, parseCheckinResult } from './common.js'
+import { request, parseUserInfo, parseCheckinResult, deriveAwardQuota } from './common.js'
 import { fetchWafCookies } from '../browser.js'
 import { getConfig } from '../config.js'
 
@@ -57,23 +57,28 @@ export default {
   },
 
   /**
-   * 带 WAF cookie 请求接口；被 WAF 拦回（非 JSON 响应）时刷新 cookie 重试一次
+   * 带 WAF cookie 请求接口。GET 被 WAF 拦回时可刷新 cookie 重试一次；
+   * POST 不重发，避免首次已成功但响应丢失时发生重复签到。
    * @returns {Promise<{status: number, json: object|null}|{failed: string}>}
    */
   async apiCall(account, path, method = 'GET') {
-    for (let attempt = 0; attempt < 2; attempt++) {
+    const attempts = String(method).toUpperCase() === 'GET' ? 2 : 1
+    for (let attempt = 0; attempt < attempts; attempt++) {
       const c = await this.ensureCookies(account, { forceRefresh: attempt > 0 })
       if (!c.ok) return { failed: c.msg }
-      const { status, json } = await request(`${account.baseUrl}${path}`, {
+      const res = await request(`${account.baseUrl}${path}`, {
         method,
         headers: this.buildHeaders(account, c.cookieHeader)
       })
       // 拿到 JSON 说明已穿过 WAF；非 JSON 多为拦截页，刷新 cookie 再试
-      if (json) return { status, json }
-      if (attempt === 0) {
-        logger.info(`[relay-checkin-plugin] anyrouter ${path} 返回非 JSON (HTTP ${status})，刷新 WAF cookie 重试`)
+      if (res.json) return res
+      if (attempt + 1 < attempts) {
+        logger.info(`[relay-checkin-plugin] anyrouter ${path} 返回非 JSON (HTTP ${res.status})，刷新 WAF cookie 重试`)
       } else {
-        return { failed: `接口未返回有效数据 (HTTP ${status})，可能被 WAF 拦截` }
+        return {
+          failed: `接口未返回有效数据 (HTTP ${res.status})，可能被 WAF 拦截`,
+          uncertain: String(method).toUpperCase() === 'POST'
+        }
       }
     }
     return { failed: WAF_MSG }
@@ -85,17 +90,29 @@ export default {
   async checkinWithInfo(account) {
     logger.info(`[relay-checkin-plugin] anyrouter 开始签到: ${account.name}`)
     const signPath = account.signPath || '/api/user/sign_in'
-    const sign = await this.apiCall(account, signPath, 'POST')
-    if (sign.failed) {
-      return {
-        checkin: { ok: false, already: false, msg: sign.failed },
-        info: { ok: false, msg: sign.failed }
-      }
+    // 先用只读请求验证/刷新 WAF cookie，同时记录余额供奖励兜底计算。
+    const before = await this.apiCall(account, '/api/user/self')
+    const beforeInfo = before.failed ? { ok: false, msg: before.failed } : parseUserInfo(before.json)
+    let sign
+    try {
+      sign = await this.apiCall(account, signPath, 'POST')
+    } catch (err) {
+      sign = { failed: err.message, uncertain: true }
     }
-    const checkin = parseCheckinResult(sign.status, sign.json)
-
     const self = await this.apiCall(account, '/api/user/self')
     const info = self.failed ? { ok: false, msg: self.failed } : parseUserInfo(self.json)
+    const derivedAward = deriveAwardQuota(beforeInfo, info)
+    let checkin
+    if (sign.failed) {
+      checkin = derivedAward != null
+        ? { ok: true, already: false, confirmed: true, awardQuota: derivedAward, statusTextOverride: '余额复核成功', msg: '' }
+        : { ok: false, already: false, uncertain: sign.uncertain, msg: sign.failed }
+    } else {
+      checkin = parseCheckinResult(sign.status, sign.json, sign)
+      if (checkin.ok && !checkin.already && checkin.awardQuota == null && derivedAward != null) {
+        checkin.awardQuota = derivedAward
+      }
+    }
     return { checkin, info }
   },
 

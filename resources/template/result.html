@@ -3,79 +3,206 @@
 <head>
 <meta charset="utf-8">
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    width: 640px;
-    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
-    background: linear-gradient(160deg, #1b1f30 0%, #232a42 100%);
-    padding: 28px;
-    color: #e8eaf2;
+  :root {
+    --ink: #19251f;
+    --muted: #748179;
+    --jade: #08795e;
+    --jade-soft: #e7f1ec;
+    --vermilion: #c83f30;
+    --vermilion-soft: #f5e6e2;
+    --gold: #b58a2d;
+    --line: #cdd5d0;
+    --paper: #f6f8f5;
   }
-  .header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 6px; }
+  * { margin: 0; padding: 0; box-sizing: border-box; letter-spacing: 0; }
+  html, body { margin: 0; padding: 0; background: transparent; }
+  #container {
+    width: 800px;
+    position: relative;
+    overflow: hidden;
+    padding: 39px 43px 29px;
+    color: var(--ink);
+    background: var(--paper);
+    font-family: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
+  }
+  #container::before,
+  #container::after {
+    content: "";
+    position: absolute;
+    width: 90px;
+    height: 90px;
+    pointer-events: none;
+    border-color: var(--jade);
+    border-style: solid;
+    opacity: 0.34;
+  }
+  #container::before { left: 18px; top: 18px; border-width: 2px 0 0 2px; }
+  #container::after { right: 18px; bottom: 18px; border-width: 0 2px 2px 0; }
+  .header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 90px;
+    gap: 22px;
+    align-items: start;
+    padding: 9px 6px 24px;
+    border-bottom: 1px solid var(--ink);
+  }
+  .kicker { color: var(--jade); font: 13px Consolas, monospace; }
   .title {
-    font-size: 26px; font-weight: bold;
-    background: linear-gradient(90deg, #7ab8ff, #b48cff);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    margin-top: 10px;
+    overflow-wrap: anywhere;
+    font-family: "Noto Serif SC", "Source Han Serif SC", "SimSun", serif;
+    font-size: 36px;
+    font-weight: 800;
+    line-height: 1.18;
   }
-  .time { font-size: 13px; color: #8a92ad; }
-  .subtitle { font-size: 13px; color: #8a92ad; margin-bottom: 14px; }
-  .user-card {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 14px;
-    padding: 16px 18px;
-    margin-top: 14px;
+  .subtitle { margin-top: 8px; color: var(--muted); font-size: 14px; }
+  .meta-time { margin-top: 5px; color: var(--muted); font: 13px Consolas, monospace; }
+  .seal {
+    width: 78px;
+    height: 78px;
+    display: grid;
+    place-items: center;
+    align-content: center;
+    color: var(--vermilion);
+    border: 3px double var(--vermilion);
+    transform: rotate(-4deg);
+    font-family: "Noto Serif SC", "SimSun", serif;
+    font-size: 19px;
+    font-weight: 800;
+    line-height: 1.15;
   }
-  .user-head { display: flex; align-items: center; margin-bottom: 10px; }
-  .user-name { font-size: 16px; font-weight: bold; color: #ffffff; }
-  .user-qq { font-size: 12px; color: #8a92ad; margin-left: 8px; }
+  .seal small { margin-top: 4px; font: 11px Consolas, monospace; }
+  .summary {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    margin-top: 16px;
+    border-top: 6px solid var(--jade);
+    border-bottom: 1px solid var(--line);
+  }
+  .summary-item { min-width: 0; padding: 11px 11px 13px; border-right: 1px solid var(--line); }
+  .summary-item:last-child { border-right: 0; }
+  .summary-label { color: var(--muted); font-size: 13px; }
+  .summary-count { display: flex; align-items: baseline; gap: 8px; margin-top: 3px; }
+  .summary-count b {
+    color: var(--ink);
+    font-family: "Noto Serif SC", "SimSun", serif;
+    font-size: 26px;
+    line-height: 1;
+  }
+  .summary-count span { color: var(--muted); font-size: 13px; }
+  .summary-item.ok b { color: var(--jade); }
+  .summary-item.notice b { color: var(--gold); }
+  .summary-item.fail b { color: var(--vermilion); }
+  .user-block { margin-top: 19px; }
+  .user-head {
+    display: grid;
+    grid-template-columns: 50px minmax(0, 1fr) auto;
+    gap: 11px;
+    align-items: center;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--ink);
+  }
+  .user-mark {
+    color: var(--vermilion);
+    font-family: "Noto Serif SC", "SimSun", serif;
+    font-size: 29px;
+    line-height: 1;
+  }
+  .user-title { min-width: 0; }
+  .user-title small { display: block; color: var(--vermilion); font-size: 13px; font-weight: 700; }
+  .user-name { overflow-wrap: anywhere; font-family: "Noto Serif SC", "SimSun", serif; font-size: 18px; font-weight: 800; }
+  .user-qq { color: var(--muted); font: 13px Consolas, monospace; white-space: nowrap; }
+  .table-head,
   .acc-row {
-    display: flex; align-items: center;
-    background: rgba(0, 0, 0, 0.18);
-    border-radius: 10px;
-    padding: 10px 12px;
-    margin-top: 8px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 150px 90px 96px;
+    gap: 9px;
+    align-items: center;
   }
-  .acc-name { flex: 1; font-size: 14px; color: #d5d9e8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .badge {
-    font-size: 12px; padding: 3px 10px; border-radius: 20px; font-weight: bold; margin-left: 10px; white-space: nowrap;
+  .table-head { min-height: 36px; color: #66736b; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .table-head span:nth-child(n+2) { text-align: right; }
+  .acc-row { min-height: 60px; padding: 5px 3px; border-bottom: 1px solid #d8ded9; }
+  .acc-name { min-width: 0; overflow-wrap: anywhere; font-size: 15px; font-weight: 700; line-height: 1.4; }
+  .status-mark { position: relative; min-width: 0; padding-left: 15px; color: var(--muted); font-size: 14px; font-weight: 700; line-height: 1.4; text-align: right; overflow-wrap: anywhere; }
+  .status-mark::before { content: "◆"; position: absolute; left: 0; top: 3px; font-size: 8px; }
+  .status-mark.ok { color: var(--jade); }
+  .status-mark.already,
+  .status-mark.unknown { color: var(--gold); }
+  .status-mark.fail { color: var(--vermilion); }
+  .acc-award { min-width: 0; color: var(--jade); font: 14px Consolas, monospace; text-align: right; overflow-wrap: anywhere; }
+  .acc-balance { min-width: 0; color: var(--ink); font: 14px Consolas, monospace; font-weight: 700; text-align: right; overflow-wrap: anywhere; }
+  .acc-msg {
+    margin-top: 6px;
+    padding: 9px 11px;
+    color: #8f3027;
+    background: var(--vermilion-soft);
+    border-right: 4px solid var(--vermilion);
+    font-size: 14px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
   }
-  .badge.ok      { background: rgba(46, 204, 113, 0.16); color: #4cd98a; }
-  .badge.already { background: rgba(245, 176, 65, 0.16); color: #f5b041; }
-  .badge.fail    { background: rgba(231, 76, 60, 0.16);  color: #ff7b6e; }
-  .acc-award { font-size: 13px; color: #f5c542; margin-left: 12px; white-space: nowrap; }
-  .acc-balance { font-size: 13px; color: #7ab8ff; margin-left: 12px; white-space: nowrap; }
-  .acc-msg { font-size: 12px; color: #ff9d94; margin: 6px 4px 0; }
-  .footer { margin-top: 18px; text-align: center; font-size: 12px; color: #5b6379; }
+  .footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-top: 24px;
+    padding: 11px 4px 0;
+    color: var(--muted);
+    border-top: 1px solid var(--line);
+    font: 12px Consolas, monospace;
+  }
+  .footer b { color: var(--jade); font-family: "Noto Serif SC", "SimSun", serif; font-size: 13px; }
 </style>
 </head>
 <body>
-  <div class="header">
-    <div class="title">{{title}}</div>
-    <div class="time">{{time}}</div>
+<main id="container">
+  <header class="header">
+    <div>
+      <div class="kicker">RELAY CHECK-IN · DAILY RECORD</div>
+      <h1 class="title">{{title}}</h1>
+      {{if subtitle}}<div class="subtitle">{{subtitle}}</div>{{/if}}
+      <div class="meta-time">{{time}}</div>
+    </div>
+    <div class="seal">
+      {{if seal}}{{seal.top}}<br>{{seal.bottom}}{{else}}签到<br>已毕{{/if}}
+      <small>RELAY</small>
+    </div>
+  </header>
+
+  {{if summaryItems}}
+  <div class="summary">
+    {{each summaryItems item}}
+    <div class="summary-item {{item.tone}}">
+      <div class="summary-label">{{item.label}}</div>
+      <div class="summary-count"><b>{{item.mark}}</b><span>{{item.value}} 条</span></div>
+    </div>
+    {{/each}}
   </div>
-  {{if subtitle}}<div class="subtitle">{{subtitle}}</div>{{/if}}
+  {{/if}}
 
   {{each users user}}
-  <div class="user-card">
+  <section class="user-block">
     <div class="user-head">
-      <span class="user-name">{{user.nickname}}</span>
-      <span class="user-qq">({{user.userId}})</span>
+      <span class="user-mark">{{user.sectionMark || '序'}}</span>
+      <div class="user-title"><small>{{user.sectionText || '用户'}}</small><span class="user-name">{{user.nickname}}</span></div>
+      <span class="user-qq">QQ {{user.userId}} · {{user.accounts.length}} 条</span>
     </div>
+    <div class="table-head"><span>站点 / 账号</span><span>状态</span><span>本次</span><span>余额</span></div>
     {{each user.accounts acc}}
     <div>
       <div class="acc-row">
         <span class="acc-name">{{acc.name}}</span>
-        {{if acc.award}}<span class="acc-award">{{acc.award}}</span>{{/if}}
-        <span class="acc-balance">余额 {{acc.balance}}</span>
-        <span class="badge {{acc.status}}">{{acc.statusText}}</span>
+        <span class="status-mark {{acc.status}}">{{acc.statusText}}</span>
+        <span class="acc-award">{{acc.award || '--'}}</span>
+        <span class="acc-balance">{{acc.balance}}</span>
       </div>
-      {{if acc.msg}}<div class="acc-msg">{{acc.msg}}</div>{{/if}}
+      {{if acc.msg}}<div class="acc-msg">批注：{{acc.msg}}</div>{{/if}}
     </div>
     {{/each}}
-  </div>
+  </section>
   {{/each}}
 
-  <div class="footer">relay-checkin-plugin · TRSS-Yunzai</div>
+  <footer class="footer"><b>中转站签到簿</b><span>relay-checkin-plugin · TRSS-Yunzai</span></footer>
+</main>
 </body>
 </html>

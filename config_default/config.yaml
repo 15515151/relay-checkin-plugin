@@ -9,14 +9,14 @@ schedule:
   # 触发后随机延迟 0~N 分钟再开始执行（避免整点并发特征），0 为不延迟
   jitterMinutes: 10
   # 相邻两个账号签到之间的随机间隔（秒），[最小, 最大]
-  accountDelay: [1, 5]
+  accountDelay: [5, 15]
   # 同时处理的用户数（单用户内部仍逐账号串行）；人多时调大，服务器弱则调小，上限 10
   concurrency: 3
 
 # 定时签到结果推送
 push:
-  # group   = 推送回账号所属群，白名单制：仅推送到群管理发过 #中转开启群推送 的群，
-  #           且群内仍有已绑定用户（合并转发形式，私聊添加的账号仍私聊推送）
+  # group   = 将全部用户的签到结果推送到 data/push_groups.json 中的每个群（合并转发形式）
+  #           群管理可在目标群发送 #中转开启群推送，将本群加入固定推送目标
   # private = 只私聊本人
   # off     = 不推送（仅记录日志）
   mode: group
@@ -28,22 +28,38 @@ request:
   # 单次请求超时（秒）
   timeout: 15
   # 网络错误重试次数
-  retry: 3
+  # 仅 GET/HEAD 等只读请求会重试；签到 POST 固定只发送一次
+  retry: 2
   userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
-# 无头浏览器方案（AnyRouter 过阿里云 WAF、Turnstile 站点自动降级签到）
+# 站点地址安全策略
+security:
+  # 默认只允许 HTTPS；确需使用 HTTP 站点时由机器人主人显式开启
+  allowHttp: false
+  # 默认禁止本机/内网/链路本地地址；确需访问私有站点时填写精确域名或 *.example.com
+  allowedPrivateHosts: []
+
+# 浏览器方案（AnyRouter 过阿里云 WAF、Turnstile 站点自动降级签到）
 browser:
   enable: true
+  # 浏览器程序路径；留空时自动选择版本最高的系统 Chrome/Edge，找不到才使用 Puppeteer 自带 Chromium
+  # Turnstile 要求浏览器保持较新，旧版 TRSS-Yunzai 建议显式填写最新版 Chrome 路径
+  executablePath: ""
   # 等待 WAF 放行的最长时间（秒）；anyrouter 的阿里云 WAF 较慢，不够时可加大
   wafTimeoutSec: 60
-  # 等待 Turnstile 挑战完成的最长时间（秒）
+  # 关闭可见接管后，Turnstile 无头尝试的最长时间（秒），范围 5~120
   turnstileTimeoutSec: 30
+  # 是否在机器人运行设备上直接打开可见浏览器处理 Turnstile
+  # 可见窗口使用独立持久档案并在复选框真正可交互后自动点击；关闭后才使用无头模式
+  turnstileInteractive: true
+  # 等待可见浏览器完成 Turnstile 的最长时间（秒），范围 30~600
+  turnstileInteractiveTimeoutSec: 120
   # 浏览器空闲多久后自动关闭（秒）
   idleCloseSec: 300
   # 全局同时打开的浏览器页面上限（每页约数十 MB 内存），超出的任务排队；上限 10
   maxConcurrentPages: 2
   # 排队等待浏览器空闲的最长时间（秒），超时该账号本次判定失败；范围 30~600
-  # 手动指令的整体超时会自动取「本值 + 120 秒」，无需另行配置
+  # 手动指令的整体超时会自动覆盖排队和当前验证模式，无需另行配置
   slotWaitSec: 120
 
 # 只发 #中转添加 地址 发起绑定后的私聊补发流程
@@ -58,7 +74,7 @@ bind:
 # 代理设置（anyrouter.top 等站点国内网络无法直连时配置）
 proxy:
   # 代理地址，支持 http 代理（如 Clash: http://127.0.0.1:7890），可带账密 http://user:pass@host:port
-  # 留空 = 不使用代理；无头浏览器方案同样走此代理
+  # 留空 = 不使用代理；无头和可见浏览器方案同样走此代理
   url: ""
   # 需要走代理的站点域名关键字（按包含匹配）；留空数组 = 配置了代理后全部站点走代理
   hosts:

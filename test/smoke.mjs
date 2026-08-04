@@ -34,26 +34,335 @@ try {
   assert.equal(cfg.push.usersPerImage, 5)
   assert.deepEqual(cfg.schedule.accountDelay, [5, 15])
   assert.equal(cfg.browser.enable, true)
+  assert.equal(cfg.browser.executablePath, '')
   assert.equal(cfg.browser.wafTimeoutSec, 60)
+  assert.equal(cfg.browser.turnstileTimeoutSec, 30)
+  assert.equal(cfg.browser.turnstileInteractive, true)
+  assert.equal(cfg.browser.turnstileInteractiveTimeoutSec, 120)
   assert.equal(cfg.bind.timeoutSec, 300)
   assert.equal(cfg.bind.groupRecallSec, 60)
   assert.equal(cfg.proxy.url, '')
   assert.deepEqual(cfg.proxy.hosts, ['anyrouter'])
   assert.equal(cfg.proxy.useForBrowser, true)
   assert.equal(cfg.schedule.concurrency, 3)
+  assert.equal(cfg.request.retry, 2)
+  assert.equal(cfg.security.allowHttp, false)
+  assert.deepEqual(cfg.security.allowedPrivateHosts, [])
   assert.equal(cfg.browser.maxConcurrentPages, 2)
-  // 手动指令的整体超时预算 = slotWaitSec + 120s，必须严格大于排队上限，
+  // 手动指令的整体超时预算必须覆盖排队与当前选择的验证模式，
   // 否则会出现「已告知失败但任务稍后真的执行了」的矛盾结果
   assert.equal(cfg.browser.slotWaitSec, 120)
-  assert.ok(cfg.browser.slotWaitSec + 120 > cfg.browser.slotWaitSec)
+  assert.ok(
+    cfg.browser.slotWaitSec + cfg.browser.turnstileTimeoutSec +
+      cfg.browser.turnstileInteractiveTimeoutSec + 120 > cfg.browser.slotWaitSec
+  )
   const cfgText = fs.readFileSync(path.join(DATA, 'config.yaml'), 'utf-8')
   assert.ok(cfgText.includes('proxy:') && cfgText.includes('groupRecallSec'), '新增配置项应写回配置文件')
+  assert.ok(cfgText.includes('turnstileInteractiveTimeoutSec'), '交互式 Turnstile 新配置应写回旧配置文件')
   assert.ok(cfgText.includes('0 0 9 * * *') && cfgText.includes('mode: private'), '写回后用户值应保留')
   assert.ok(cfgText.includes('# 代理设置'), '模板注释应保留')
   console.log('config OK')
 
+  // ---- browser pool/profile pure logic ----
+  const {
+    browserPoolKey,
+    interactiveProfilePath,
+    browserHangBudgetMs,
+    navigateForTurnstile,
+    autoClickTurnstileCheckbox,
+    bypassServiceWorkerCompat,
+    legacyFrameOwnerBox,
+    turnstileCheckboxPoint,
+    resolveBrowserExecutable,
+    newPageSafe,
+    turnstileBrowserMode,
+    browserExecutableVersion
+  } = await import('../models/browser.js')
+  assert.equal(
+    browserPoolKey({ proxyServer: '', profileKey: 'ioll.pp.ua' }),
+    'headless|direct',
+    '无头浏览器应按网络出口复用'
+  )
+  assert.notEqual(
+    browserPoolKey({ interactive: true, profileKey: 'ioll.pp.ua' }),
+    browserPoolKey({ interactive: true, profileKey: 'free.sulmate.cn' }),
+    '可见浏览器档案必须按站点隔离'
+  )
+  assert.notEqual(
+    browserPoolKey({ interactive: true, profileKey: 'ioll.pp.ua' }),
+    browserPoolKey({ interactive: true, profileKey: 'ioll.pp.ua', proxyServer: 'http://127.0.0.1:7897' }),
+    '可见浏览器档案必须按代理出口隔离'
+  )
+  assert.notEqual(
+    interactiveProfilePath('ioll.pp.ua', '', 'C:/Chrome/chrome.exe'),
+    interactiveProfilePath('ioll.pp.ua', '', 'C:/Edge/msedge.exe'),
+    '更换浏览器内核后必须使用全新档案，避免旧风控状态污染'
+  )
+  assert.equal(
+    interactiveProfilePath('ioll.pp.ua'),
+    interactiveProfilePath('ioll.pp.ua'),
+    '相同站点和出口的档案路径必须稳定'
+  )
+  assert.ok(
+    interactiveProfilePath('ioll.pp.ua').startsWith(path.join(DATA, 'browser-profile')),
+    '持久浏览器档案必须保存在已忽略提交的 data 目录'
+  )
+  const fakeProgramFiles = path.join(ROOT, 'fake-program-files')
+  const fakeChrome = path.join(fakeProgramFiles, 'Google', 'Chrome', 'Application', 'chrome.exe')
+  const fakeEdge = path.join(fakeProgramFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe')
+  assert.equal(resolveBrowserExecutable('', {
+    platform: 'win32',
+    env: { PROGRAMFILES: fakeProgramFiles },
+    exists: candidate => candidate === fakeChrome || candidate === fakeEdge,
+    versionOf: candidate => candidate === fakeEdge ? '151.0.1.0' : '129.0.1.0'
+  }), fakeEdge, 'Windows 应自动选择版本最高的系统 Chrome/Edge')
+  assert.equal(browserExecutableVersion(fakeEdge, {
+    platform: 'win32',
+    spawn: (command, args) => {
+      assert.equal(command, 'powershell.exe')
+      assert.ok(args.includes('-EncodedCommand'), '含空格的浏览器路径应通过编码命令安全传给 PowerShell')
+      return { stdout: '151.0.4129.59\r\n', stderr: '', status: 0 }
+    }
+  }), '151.0.4129.59', '应正确读取 Windows 浏览器文件版本')
+  let createdExtraPage = false
+  const initialBlank = { url: () => 'about:blank' }
+  assert.equal(await newPageSafe({
+    pages: async () => [initialBlank],
+    newPage: async () => { createdExtraPage = true; return {} }
+  }, 1000, { reuseBlank: true }), initialBlank, '可见浏览器应复用启动自带的空白页')
+  assert.equal(createdExtraPage, false, '复用初始页后不应再留下 about:blank 标签')
+  assert.equal(turnstileBrowserMode(cfg.browser), 'interactive', '默认应直接使用可见模式，不先执行无头挑战')
+  assert.equal(turnstileBrowserMode({ turnstileInteractive: false }), 'headless', '关闭可见接管时才使用无头模式')
+  assert.equal(browserHangBudgetMs(cfg.browser), 540000, '默认总预算应覆盖直接可见模式的排队、验证与硬超时余量')
+  assert.equal(
+    browserHangBudgetMs({
+      slotWaitSec: 600,
+      turnstileTimeoutSec: 120,
+      turnstileInteractive: true,
+      turnstileInteractiveTimeoutSec: 600
+    }),
+    1500000,
+    '配置取最大值时总预算仍必须覆盖可见模式等待与启动余量'
+  )
+  assert.equal(
+    browserHangBudgetMs({
+      slotWaitSec: 120,
+      turnstileTimeoutSec: 30,
+      turnstileInteractive: false,
+      turnstileInteractiveTimeoutSec: 600
+    }),
+    450000,
+    '关闭可见接管时不应计入第二次排队和交互等待'
+  )
+  let publicBypass = null
+  assert.equal(
+    await bypassServiceWorkerCompat({
+      setBypassServiceWorker: async value => { publicBypass = value }
+    }),
+    'page-api',
+    '新版 Puppeteer 应使用公开的 Service Worker API'
+  )
+  assert.equal(publicBypass, true)
+
+  let legacyBypass = null
+  assert.equal(
+    await bypassServiceWorkerCompat({
+      _client: () => ({
+        send: async (method, params) => { legacyBypass = { method, params } }
+      })
+    }),
+    'cdp',
+    '旧版 Puppeteer 应通过 CDP 兼容禁用 Service Worker'
+  )
+  assert.deepEqual(legacyBypass, {
+    method: 'Network.setBypassServiceWorker',
+    params: { bypass: true }
+  })
+  assert.equal(
+    await bypassServiceWorkerCompat({}),
+    'unsupported',
+    '完全不支持时应跳过可选优化而不是阻断签到'
+  )
+  const legacyCdpCalls = []
+  const legacyBox = await legacyFrameOwnerBox({
+    _client: {
+      send: async (method, params) => {
+        legacyCdpCalls.push({ method, params })
+        if (method === 'DOM.getFrameOwner') return { backendNodeId: 88 }
+        return { model: { border: [100, 200, 400, 200, 400, 265, 100, 265] } }
+      }
+    }
+  }, { _id: 'turnstile-frame' })
+  assert.deepEqual(legacyBox, { x: 100, y: 200, width: 300, height: 65 })
+  assert.deepEqual(legacyCdpCalls, [
+    { method: 'DOM.getFrameOwner', params: { frameId: 'turnstile-frame' } },
+    { method: 'DOM.getBoxModel', params: { backendNodeId: 88 } }
+  ])
+  const checkboxClient = {
+    send: async method => method === 'Accessibility.getFullAXTree'
+      ? {
+          nodes: [{
+            role: { value: 'checkbox' },
+            name: { value: '请验证您是真人' },
+            backendDOMNodeId: 22,
+            ignored: false
+          }]
+        }
+      : { model: { border: [9, 20.5, 139, 20.5, 139, 44.5, 9, 44.5] } }
+  }
+  assert.deepEqual(
+    await turnstileCheckboxPoint({}, {
+      _id: 'ready-turnstile-frame',
+      _client: () => checkboxClient
+    }, { x: 100, y: 200, width: 300, height: 65 }),
+    {
+      supported: true,
+      point: { x: 131, y: 232.5 },
+      name: '请验证您是真人'
+    },
+    '应等到无障碍树暴露真实 checkbox 后再计算点击位置'
+  )
+  let stoppedPartialPage = false
+  const partialNavigation = await navigateForTurnstile({
+    goto: async () => { throw new Error('Navigation timeout of 30000 ms exceeded') },
+    url: () => 'https://ioll.pp.ua/',
+    waitForSelector: async selector => selector === 'body' ? {} : null,
+    evaluate: async () => { stoppedPartialPage = true }
+  }, 'https://ioll.pp.ua')
+  assert.equal(partialNavigation.partial, true, '同源页面主体可用时不应被 DOMContentLoaded 超时误杀')
+  assert.equal(stoppedPartialPage, true, '继续前应停止页面剩余的悬挂加载')
+  await assert.rejects(
+    navigateForTurnstile({
+      goto: async () => { throw new Error('Navigation timeout of 30000 ms exceeded') },
+      url: () => 'chrome-error://chromewebdata/',
+      waitForSelector: async () => null,
+      evaluate: async () => {}
+    }, 'https://ioll.pp.ua'),
+    /打开站点页面超时/,
+    '浏览器错误页仍应判定为真实导航失败'
+  )
+  let checkedBodyForCertificateError = false
+  await assert.rejects(
+    navigateForTurnstile({
+      goto: async () => { throw new Error('net::ERR_CERT_AUTHORITY_INVALID') },
+      url: () => 'https://ioll.pp.ua/',
+      waitForSelector: async () => { checkedBodyForCertificateError = true; return {} },
+      evaluate: async () => {}
+    }, 'https://ioll.pp.ua'),
+    /打开站点页面失败.*ERR_CERT_AUTHORITY_INVALID/,
+    '证书等非超时错误不能因同源 body 存在而被放行'
+  )
+  assert.equal(checkedBodyForCertificateError, false, '非恢复型导航错误不应检查或复用错误页主体')
+  await assert.rejects(
+    navigateForTurnstile({
+      goto: async () => ({}),
+      url: () => 'https://other.example/',
+      waitForSelector: async () => null,
+      evaluate: async () => {}
+    }, 'https://ioll.pp.ua'),
+    /跳转到了不同域名.*请使用该最终地址重新绑定/,
+    'Turnstile token 与提交接口必须保持同源'
+  )
+
+  let clickedPoint = null
+  let iframeDisposed = false
+  const frameHandle = {
+    boundingBox: async () => ({ x: 100, y: 200, width: 300, height: 65 }),
+    dispose: async () => { iframeDisposed = true }
+  }
+  const readyFrame = {
+    _id: 'ready-modern-turnstile-frame',
+    url: () => 'https://challenges.cloudflare.com/cdn-cgi/challenge-platform/turnstile',
+    frameElement: async () => frameHandle,
+    _client: () => checkboxClient
+  }
+  const clicked = await autoClickTurnstileCheckbox({
+    frames: () => [readyFrame],
+    $: async () => { throw new Error('frame tree 命中后不应再走 DOM 回退') },
+    mouse: {
+      move: async () => {},
+      click: async (x, y, options) => { clickedPoint = { x, y, options } }
+    },
+    evaluate: async () => {}
+  }, 30, () => false)
+  assert.equal(clicked, true, '标准 Turnstile iframe 应自动点击一次')
+  assert.deepEqual(clickedPoint, { x: 131, y: 232.5, options: { delay: 120 } })
+  assert.equal(iframeDisposed, true, '自动点击后应释放 iframe 句柄')
+
+  let readinessPolls = 0
+  let clickedBeforeReady = false
+  const notReady = await autoClickTurnstileCheckbox({
+    frames: () => [{
+      _id: 'loading-turnstile-frame',
+      url: () => 'https://challenges.cloudflare.com/loading-turnstile',
+      frameElement: async () => ({
+        boundingBox: async () => ({ x: 100, y: 200, width: 300, height: 65 }),
+        dispose: async () => {}
+      }),
+      _client: () => ({
+        send: async method => {
+          if (method === 'Accessibility.getFullAXTree') {
+            readinessPolls++
+            return { nodes: [] }
+          }
+          return { model: null }
+        }
+      })
+    }],
+    mouse: {
+      move: async () => {},
+      click: async () => { clickedBeforeReady = true }
+    },
+    evaluate: async () => {}
+  }, 30, () => readinessPolls >= 2)
+  assert.equal(notReady, false)
+  assert.equal(clickedBeforeReady, false, '只有 iframe 外框、checkbox 尚未就绪时绝不能提前点击')
+
+  let legacyClickedPoint = null
+  const legacyFrame = {
+    _id: 'legacy-turnstile-frame',
+    url: () => 'https://challenges.cloudflare.com/cdn-cgi/challenge-platform/turnstile',
+    _client: () => checkboxClient
+  }
+  const legacyClicked = await autoClickTurnstileCheckbox({
+    frames: () => [legacyFrame],
+    _client: () => ({
+      send: async method => method === 'DOM.getFrameOwner'
+        ? { backendNodeId: 99 }
+        : { model: { border: [100, 200, 400, 200, 400, 265, 100, 265] } }
+    }),
+    $: async () => { throw new Error('旧版 frame owner 命中后不应再走 DOM 回退') },
+    mouse: {
+      move: async () => {},
+      click: async (x, y, options) => { legacyClickedPoint = { x, y, options } }
+    },
+    evaluate: async () => {}
+  }, 30, () => false)
+  assert.equal(legacyClicked, true, '旧版 Puppeteer 也应定位并点击 Turnstile iframe')
+  assert.deepEqual(legacyClickedPoint, { x: 131, y: 232.5, options: { delay: 120 } })
+
+  let manualCompleted = false
+  let clickedAfterManual = false
+  const canceledClick = await autoClickTurnstileCheckbox({
+    $: async () => {
+      setTimeout(() => { manualCompleted = true }, 50)
+      return {
+        boundingBox: async () => ({ x: 100, y: 200, width: 300, height: 65 }),
+        dispose: async () => {}
+      }
+    },
+    mouse: {
+      move: async () => {},
+      click: async () => { clickedAfterManual = true }
+    },
+    evaluate: async () => {}
+  }, 30, () => manualCompleted)
+  assert.equal(canceledClick, false, '人工验证先完成时应取消待执行的自动点击')
+  assert.equal(clickedAfterManual, false, 'token 已生成后不得再点击验证控件')
+  console.log('browser profile OK')
+
   // ---- adapters/common ----
-  const { quotaToUsd, parseUserInfo, parseCheckinResult, matchProxy } = await import('../models/adapters/common.js')
+  const { quotaToUsd, parseUserInfo, parseCheckinResult, deriveAwardQuota, matchProxy } = await import('../models/adapters/common.js')
   // 代理域名匹配：hosts 关键字包含匹配；空数组 = 全部走代理；未配置 url = 不走
   const P = 'http://127.0.0.1:7890'
   assert.equal(matchProxy('anyrouter.top', { url: P, hosts: ['anyrouter'] }), P)
@@ -91,12 +400,28 @@ try {
   assert.match(r.msg, /重定向/)
   r = parseCheckinResult(401, { success: false })
   assert.match(r.msg, /凭据/)
+  r = parseCheckinResult(200, { ret: 1, msg: 'ok', data: { quota: 123 } })
+  assert.deepEqual([r.ok, r.awardQuota], [true, 123])
+  r = parseCheckinResult(200, { code: 0, msg: 'ok' })
+  assert.equal(r.ok, true)
+  r = parseCheckinResult(403, null, { textSnippet: '<title>Access Verification</title> aliyun_waf' })
+  assert.match(r.msg, /WAF/)
+  assert.equal(deriveAwardQuota(
+    { quota: 1000000, usedQuota: 100000 },
+    { quota: 1200000, usedQuota: 400000 }
+  ), 500000, '奖励推导应抵消签到期间的正常消费')
   console.log('adapters/common OK')
 
   // ---- adapters/index ----
   const { normalizeBaseUrl, cookieTypeForHost, getAdapter } = await import('../models/adapters/index.js')
   assert.equal(normalizeBaseUrl('xx.com/'), 'https://xx.com')
-  assert.equal(normalizeBaseUrl('http://a.b//'), 'http://a.b')
+  assert.throws(() => normalizeBaseUrl('http://a.b'), /HTTPS/)
+  assert.throws(() => normalizeBaseUrl('https://127.0.0.1'), /不允许/)
+  assert.throws(() => normalizeBaseUrl('https://example.com/path'), /根地址/)
+  const { isPrivateAddress } = await import('../models/url-security.js')
+  assert.equal(isPrivateAddress('10.0.0.1'), true)
+  assert.equal(isPrivateAddress('169.254.169.254'), true)
+  assert.equal(isPrivateAddress('8.8.8.8'), false)
   assert.equal(cookieTypeForHost('agentrouter.org'), 'agentrouter')
   assert.equal(cookieTypeForHost('xx.agentrouter.cn'), 'agentrouter')
   assert.equal(cookieTypeForHost('ps.air-outer.com'), 'agentrouter', 'air-outer.com 系域名应识别为 AgentRouter')
@@ -120,10 +445,23 @@ try {
   const generic = (await import('../models/adapters/generic.js')).default
   h = generic.buildHeaders({ token: 'S', siteUserId: 5 })
   assert.equal(h.Cookie, 'session=S')
-  const agentrouter = (await import('../models/adapters/agentrouter.js')).default
+  const agentrouterModule = await import('../models/adapters/agentrouter.js')
+  const agentrouter = agentrouterModule.default
   h = agentrouter.buildHeaders({ token: 'S', siteUserId: 7 })
   assert.equal(h.Cookie, 'session=S')
   assert.equal(h['New-Api-User'], '7')
+  assert.equal(agentrouterModule.sessionCookieFrom([
+    'acw_tc=x; Path=/',
+    'session=abc.def==; Path=/; HttpOnly'
+  ]), 'abc.def==')
+  assert.equal(agentrouterModule.parseLoginAwardQuota({
+    data: {
+      quota_per_unit: 500000,
+      announcements: [{ content: '支持登录签到；签到送 $25 Credit' }]
+    }
+  }), 12500000)
+  assert.equal(agentrouterModule.hasEmailLogin({ authMode: 'email', loginEmail: 'u@example.com', password: 'p' }), true)
+  assert.equal(agentrouterModule.hasEmailLogin({ token: 'session-only' }), false)
   const anyrouter = (await import('../models/adapters/anyrouter.js')).default
   h = anyrouter.buildHeaders({ token: 'S', siteUserId: 8 })
   assert.equal(h.Cookie, 'session=S')
@@ -160,13 +498,25 @@ try {
   assert.deepEqual([up.index, up.updated], [2, false])
   assert.equal(store.getEntry(eGroup).accounts.length, 2)
 
+  // AgentRouter 官方域名与备用域名是同一站，同一用户ID应更新而不是重复添加。
+  const official = store.upsertAccount(eGroup, acc({
+    name: 'agentrouter.org', baseUrl: 'https://agentrouter.org', siteUserId: 99, token: 'official-1'
+  }))
+  assert.equal(official.updated, false)
+  const alias = store.upsertAccount(eGroup, acc({
+    name: 'ps.air-outer.com', baseUrl: 'https://ps.air-outer.com', siteUserId: 99, token: 'official-2'
+  }))
+  assert.equal(alias.updated, true)
+  assert.equal(alias.index, official.index)
+  assert.equal(alias.account.baseUrl, 'https://ps.air-outer.com')
+
   // 同站点同站点用户ID → 更新凭据，且保留单账号定时开关偏好
   store.setAccountAuto(eGroup, 1, false)
   up = store.upsertAccount(eGroup, acc({ token: 't1-new' }))
   assert.deepEqual([up.index, up.updated], [1, true])
   assert.equal(up.account, store.getEntry(eGroup).accounts[0], '应返回入库后的对象引用（供添加后签到直接落缓存）')
   let entryNow = store.getEntry(eGroup)
-  assert.equal(entryNow.accounts.length, 2)
+  assert.equal(entryNow.accounts.length, 3)
   assert.equal(entryNow.accounts[0].token, 't1-new')
   assert.equal(entryNow.accounts[0].auto, false, '更新凭据不应重置单账号定时开关')
 
@@ -174,7 +524,7 @@ try {
   up = store.upsertAccount(eGroup, acc({ name: 'b.com', baseUrl: 'https://b.com', siteUserId: null, token: 'bt' }))
   assert.equal(up.updated, false)
   up = store.upsertAccount(eGroup, acc({ name: 'b.com', baseUrl: 'https://b.com', siteUserId: null, token: 'bt' }))
-  assert.deepEqual([up.index, up.updated], [3, true])
+  assert.deepEqual([up.index, up.updated], [4, true])
 
   // accountLabel / setAccountAuto 边界
   assert.equal(store.accountLabel({ name: 'x.com', username: 'U' }), 'x.com (U)')
@@ -183,7 +533,7 @@ try {
 
   // 私聊可见同一批账号；且私聊不清空 groupId
   const en2 = store.touchEntry(ePrivate)
-  assert.equal(en2.accounts.length, 3, '私聊应共享群里添加的账号')
+  assert.equal(en2.accounts.length, 4, '私聊应共享群里添加的账号')
   assert.equal(en2.groupId, '999', '私聊使用不应清空最近群')
 
   // 换群后 groupId 跟随最近使用的群，且两个群都留在候选列表里（最近优先）
@@ -204,8 +554,8 @@ try {
 
   // 删除（仅操作本用户数据）
   assert.equal(store.removeAccount(eGroup, 9), null)
-  assert.equal(store.removeAccount(eGroup, 3).name, 'b.com')
-  assert.equal(store.getEntry(eGroup).accounts.length, 2)
+  assert.equal(store.removeAccount(eGroup, 4).name, 'b.com')
+  assert.equal(store.getEntry(eGroup).accounts.length, 3)
 
   // 定时总开关 + allEntries
   store.setAuto(eGroup, false)
@@ -264,15 +614,41 @@ try {
   console.log('lock OK')
 
   // 定时推送白名单
+  assert.deepEqual(store.getPushGroups(), [])
   assert.equal(store.isPushGroup('999'), false)
   assert.equal(store.setPushGroup('999', true), true)
   assert.equal(store.setPushGroup('999', true), false, '重复开启应返回未变化')
+  assert.deepEqual(store.getPushGroups(), ['999'])
   assert.equal(store.isPushGroup(999), true, '数字/字符串群号应等价')
   assert.equal(store.setPushGroup('999', false), true)
   assert.equal(store.isPushGroup('999'), false)
   store.setPushGroup('888', true)
   assert.ok(fs.existsSync(path.join(DATA, 'push_groups.json')), '白名单应落盘')
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(DATA, 'push_groups.json'), 'utf-8')), ['888'])
+  // 手工编辑名单应热生效；群号统一转成字符串并去重、去空值
+  fs.writeFileSync(path.join(DATA, 'push_groups.json'), JSON.stringify(['777', 777, '', null]))
+  assert.deepEqual(store.getPushGroups(), ['777'])
+  assert.equal(store.isPushGroup('777'), true)
+  assert.equal(store.isPushGroup('888'), false)
+
+  // 固定群推送计划：每个目标群都包含同一机器人名下的全部用户
+  const { buildGroupPushPlan } = await import('../models/push-plan.js')
+  const pushItems = [
+    { entry: { selfId: 'bot-1', userId: '111' }, results: [] },
+    { entry: { selfId: 'bot-1', userId: '222' }, results: [] },
+    { entry: { selfId: 'bot-2', userId: '333' }, results: [] }
+  ]
+  const pushPlan = buildGroupPushPlan(pushItems, ['100', '200'])
+  assert.equal(pushPlan.length, 4)
+  assert.deepEqual(
+    pushPlan.map(plan => [plan.selfId, plan.groupId, plan.items.map(item => item.entry.userId)]),
+    [
+      ['bot-1', '100', ['111', '222']],
+      ['bot-1', '200', ['111', '222']],
+      ['bot-2', '100', ['333']],
+      ['bot-2', '200', ['333']]
+    ]
+  )
 
   // 持久化落盘验证
   const onDisk = JSON.parse(fs.readFileSync(path.join(DATA, 'accounts.json'), 'utf-8'))
@@ -291,6 +667,7 @@ try {
   // ---- 指令正则（与 apps/checkin.js 保持一致）----
   const rules = {
     help: /^#中转(站)?(帮助|help)$/,
+    addEmail: /^#中转添加邮箱\s+\S+(?:\s+\S+)*$/,
     addCookie: /^#中转添加[cC]ookie\s+\S+(?:\s+\S+)*$/,
     add: /^#中转添加\s+\S+(?:\s+\S+)*$/,
     list: /^#中转列表$/,
@@ -303,6 +680,8 @@ try {
     bind: /^[\s\S]+$/
   }
   assert.ok(rules.help.test('#中转帮助') && rules.help.test('#中转站help'))
+  assert.ok(rules.addEmail.test('#中转添加邮箱 agentrouter.org'))
+  assert.ok(rules.addEmail.test('#中转添加邮箱 agentrouter.org user@example.com password'))
   assert.ok(rules.add.test('#中转添加 https://x.com abc'))
   assert.ok(rules.add.test('#中转添加 x.com abc 123'))
   assert.ok(rules.add.test('#中转添加 x.com'), '仅地址应命中（发起私聊绑定流程）')

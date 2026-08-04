@@ -40,13 +40,20 @@ const DEFAULT_CONFIG = {
   },
   request: {
     timeout: 15,
-    retry: 1,
+    retry: 2,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+  },
+  security: {
+    allowHttp: false,
+    allowedPrivateHosts: []
   },
   browser: {
     enable: true,
+    executablePath: '',
     wafTimeoutSec: 60,
     turnstileTimeoutSec: 30,
+    turnstileInteractive: true,
+    turnstileInteractiveTimeoutSec: 120,
     idleCloseSec: 300,
     maxConcurrentPages: 2,
     slotWaitSec: 120

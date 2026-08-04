@@ -10,6 +10,7 @@ import { request, parseUserInfo, parseCheckinResult } from './common.js'
 export default {
   type: 'generic',
   label: 'Cookie通用',
+  compareBalance: true,
 
   buildHeaders(account) {
     return {
@@ -29,10 +30,10 @@ export default {
 
   async checkin(account) {
     const signPath = account.signPath || '/api/user/sign_in'
-    const { status, json } = await request(`${account.baseUrl}${signPath}`, {
+    const res = await request(`${account.baseUrl}${signPath}`, {
       method: 'POST',
       headers: this.buildHeaders(account)
     })
-    return parseCheckinResult(status, json)
+    return parseCheckinResult(res.status, res.json, res)
   }
 }
