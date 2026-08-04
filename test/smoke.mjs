@@ -49,7 +49,7 @@ try {
   assert.equal(cfg.security.allowHttp, false)
   assert.deepEqual(cfg.security.allowedPrivateHosts, [])
   assert.equal(cfg.browser.maxConcurrentPages, 2)
-  // 手动指令的整体超时预算必须覆盖排队、无头尝试与可见验证，
+  // 手动指令的整体超时预算必须覆盖排队与当前选择的验证模式，
   // 否则会出现「已告知失败但任务稍后真的执行了」的矛盾结果
   assert.equal(cfg.browser.slotWaitSec, 120)
   assert.ok(
@@ -73,7 +73,9 @@ try {
     bypassServiceWorkerCompat,
     legacyFrameOwnerBox,
     turnstileCheckboxPoint,
-    resolveBrowserExecutable
+    resolveBrowserExecutable,
+    newPageSafe,
+    turnstileBrowserMode
   } = await import('../models/browser.js')
   assert.equal(
     browserPoolKey({ proxyServer: '', profileKey: 'ioll.pp.ua' }),
@@ -89,6 +91,11 @@ try {
     browserPoolKey({ interactive: true, profileKey: 'ioll.pp.ua' }),
     browserPoolKey({ interactive: true, profileKey: 'ioll.pp.ua', proxyServer: 'http://127.0.0.1:7897' }),
     '可见浏览器档案必须按代理出口隔离'
+  )
+  assert.notEqual(
+    interactiveProfilePath('ioll.pp.ua', '', 'C:/Chrome/chrome.exe'),
+    interactiveProfilePath('ioll.pp.ua', '', 'C:/Edge/msedge.exe'),
+    '更换浏览器内核后必须使用全新档案，避免旧风控状态污染'
   )
   assert.equal(
     interactiveProfilePath('ioll.pp.ua'),
@@ -106,7 +113,16 @@ try {
     env: { PROGRAMFILES: fakeProgramFiles },
     exists: candidate => candidate === fakeChrome
   }), fakeChrome, 'Windows 应自动优先使用系统 Chrome')
-  assert.equal(browserHangBudgetMs(cfg.browser), 990000, '默认总预算应覆盖两阶段排队、验证与浏览器硬超时余量')
+  let createdExtraPage = false
+  const initialBlank = { url: () => 'about:blank' }
+  assert.equal(await newPageSafe({
+    pages: async () => [initialBlank],
+    newPage: async () => { createdExtraPage = true; return {} }
+  }, 1000, { reuseBlank: true }), initialBlank, '可见浏览器应复用启动自带的空白页')
+  assert.equal(createdExtraPage, false, '复用初始页后不应再留下 about:blank 标签')
+  assert.equal(turnstileBrowserMode(cfg.browser), 'interactive', '默认应直接使用可见模式，不先执行无头挑战')
+  assert.equal(turnstileBrowserMode({ turnstileInteractive: false }), 'headless', '关闭可见接管时才使用无头模式')
+  assert.equal(browserHangBudgetMs(cfg.browser), 540000, '默认总预算应覆盖直接可见模式的排队、验证与硬超时余量')
   assert.equal(
     browserHangBudgetMs({
       slotWaitSec: 600,
@@ -114,8 +130,8 @@ try {
       turnstileInteractive: true,
       turnstileInteractiveTimeoutSec: 600
     }),
-    2520000,
-    '配置取最大值时总预算仍必须覆盖两阶段等待与启动余量'
+    1500000,
+    '配置取最大值时总预算仍必须覆盖可见模式等待与启动余量'
   )
   assert.equal(
     browserHangBudgetMs({

@@ -7,7 +7,7 @@ TRSS-Yunzai 中转站自动签到插件（OneBot v11）。支持主流开源中�
 - 自动识别站点类型（new-api 令牌 / Veloera 令牌 / AnyRouter / AgentRouter / Cookie 通用）
 - 群内隐私绑定：群里只发 `#中转添加 地址`，令牌/session 私聊补发，超时/失败/成功都会引用原消息回群提示
 - 同一站点支持多个账号（按站点用户ID区分，同一账号重复添加只更新凭据）；添加/更新成功后自动签到一次，未签的顺带签上、已签的正确标记为今日已签
-- Cloudflare Turnstile 站点自动降级浏览器方案：先无头尝试，再用持久可见浏览器自动点击标准复选框，升级挑战保留人工接管
+- Cloudflare Turnstile 站点默认直接使用持久可见系统浏览器，等复选框真正可交互后自动点击；升级挑战保留人工接管
 - 兼容部分 NewAPI 魔改站的网页 `X-Game-*` 完整性校验：服务端明确拒绝后补齐公开网页所用请求头再试一次
 - AnyRouter（anyrouter.top）支持：无头浏览器过阿里云 WAF 后页内签到
 - AgentRouter（agentrouter.org / *.air-outer.com）：支持重置站内密码后的邮箱登录签到，依据官方登录响应与余额变化确认 `$25`；旧 Cookie 模式仅验证 Session，不把保活误报为签到
@@ -91,8 +91,8 @@ AnyRouter 同理（`#中转添加cookie anyrouter.top <session值> <用户ID>`�
 - `push.usersPerImage`：群合并转发每张图最多展示的用户数（默认 5）
 - `browser.enable`：浏览器方案总开关（AnyRouter 过 WAF、Turnstile 站点降级签到）
 - `browser.executablePath`：浏览器程序路径；留空时优先自动使用系统 Chrome/Edge。Turnstile 报 `300*`/`600*` 时应确认系统浏览器为最新版，也可显式填写 Chrome 路径
-- `browser.turnstileTimeoutSec`：Turnstile 无头快速尝试时间（默认 30 秒，范围 5~120）。未获 token 时不会再刷新后重复空等
-- `browser.turnstileInteractive`：无头尝试失败后是否打开可见浏览器接管（默认开启）。可见模式按站点和代理使用独立持久档案，并先自动点击一次验证复选框；Cloudflare 未放行时需在机器人运行设备上手动完成验证
+- `browser.turnstileTimeoutSec`：关闭可见接管后，Turnstile 无头尝试时间（默认 30 秒，范围 5~120）
+- `browser.turnstileInteractive`：是否直接打开可见浏览器处理 Turnstile（默认开启）。可见模式按站点、代理和浏览器内核使用独立持久档案，复选框真正可交互后才自动点击；Cloudflare 未放行时可人工接管
 - `browser.turnstileInteractiveTimeoutSec`：可见浏览器等待验证的时间（默认 120 秒，范围 30~600）
 - `request.retry`：只读请求网络失败后的重试次数（默认 2）；签到 `POST` 通常只发送一次，响应不确定时改用状态接口复核。仅当站点明确返回缺少 `X-Game-*` 完整性标记时，才会补齐该标记再发一次
 - `security.allowHttp`：是否允许添加 HTTP 站点（默认 `false`）
@@ -108,7 +108,7 @@ AnyRouter 同理（`#中转添加cookie anyrouter.top <session值> <用户ID>`�
 
 ## 已知限制
 
-- Turnstile 会先进行一次无头快速尝试；失败后默认打开持久档案的可见浏览器，并在同一页面、同一代理出口下取得 token 后立即提交。持久档案能保留浏览器信任状态，但不能保证 Cloudflare 每次自动放行
+- Turnstile 默认直接打开持久档案的可见系统浏览器，避免无头挑战先行失败并污染风险评分；关闭 `browser.turnstileInteractive` 后才使用无头模式。token 会在同一页面、同一代理出口下立即提交
 - 要求交互时，需在机器人运行设备弹出的窗口内完成验证；Linux 服务器必须有可用的 `DISPLAY` 或 `WAYLAND_DISPLAY`。纯命令行服务器无法显示窗口时会立即返回明确错误，可在配置中关闭 `browser.turnstileInteractive`
 - 可见模式只对标准 Turnstile 复选框自动点击一次，不尝试绕过升级后的交互挑战，也不默认接入第三方打码服务，避免向外部服务泄露站点地址、访问上下文或账号相关信息。因此无人值守定时任务遇到必须人工完成的挑战时仍可能失败
 - AnyRouter 的 WAF 策略可能变化，若持续提示「WAF 未放行」可稍后重试或提 issue

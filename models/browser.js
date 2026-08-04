@@ -9,7 +9,7 @@ import { assertSafeRequestUrl } from './url-security.js'
  * 浏览器工具：用于过阿里云 WAF（AnyRouter 系）与 Cloudflare Turnstile 挑战。
  * puppeteer 惰性加载（复用 Yunzai 根目录依赖，缺失时仅浏览器功能不可用，不影响插件加载）。
  *
- * 无头实例按代理模式复用；可见实例按站点与代理模式隔离，并使用持久用户档案。
+ * 无头实例按代理模式复用；可见实例按站点、代理和浏览器内核隔离，并使用持久用户档案。
  * 这样直连站与代理站可同时进行，任何站点都不会被迫用错的网络模式访问
  * （带账密代理的认证走 page.authenticate，chromium 的 --proxy-server 不接受账密）。
  */
@@ -24,9 +24,11 @@ function getPool(poolKey, interactive = false) {
   return pools.get(poolKey)
 }
 
-function profileFingerprint(profileKey, proxyServer = '') {
+const PROFILE_SCHEMA_VERSION = 'turnstile-system-browser-v2'
+
+function profileFingerprint(profileKey, proxyServer = '', executablePath = '') {
   return crypto.createHash('sha256')
-    .update(`${String(profileKey).toLowerCase()}\n${proxyServer || 'direct'}`)
+    .update(`${PROFILE_SCHEMA_VERSION}\n${String(profileKey).toLowerCase()}\n${proxyServer || 'direct'}\n${executablePath || 'default'}`)
     .digest('hex')
     .slice(0, 20)
 }
@@ -34,15 +36,15 @@ function profileFingerprint(profileKey, proxyServer = '') {
 /**
  * 导出纯逻辑辅助函数供冒烟测试验证池隔离和档案路径稳定性。
  */
-export function browserPoolKey({ interactive = false, proxyServer = '', profileKey = '' } = {}) {
+export function browserPoolKey({ interactive = false, proxyServer = '', profileKey = '', executablePath = '' } = {}) {
   const route = proxyServer || 'direct'
   return interactive
-    ? `interactive|${profileFingerprint(profileKey, route)}`
+    ? `interactive|${profileFingerprint(profileKey, route, executablePath)}`
     : `headless|${route}`
 }
 
-export function interactiveProfilePath(profileKey, proxyServer = '') {
-  return path.join(DATA_PATH, 'browser-profile', profileFingerprint(profileKey, proxyServer || 'direct'))
+export function interactiveProfilePath(profileKey, proxyServer = '', executablePath = '') {
+  return path.join(DATA_PATH, 'browser-profile', profileFingerprint(profileKey, proxyServer || 'direct', executablePath))
 }
 
 /**
@@ -179,7 +181,16 @@ function withTimeout(promise, ms, msg) {
  * 打开页面并带超时：超时后底层调用仍可能产出 Page，
  * 挂个兜底回调把晚到的页面关掉，避免数十 MB 常驻泄漏
  */
-async function newPageSafe(browser, ms) {
+export async function newPageSafe(browser, ms, { reuseBlank = false } = {}) {
+  if (reuseBlank && typeof browser.pages === 'function') {
+    try {
+      const pages = await withTimeout(browser.pages(), ms, '读取浏览器初始页面超时')
+      const blank = pages.find(page => page?.url?.() === 'about:blank')
+      if (blank) return blank
+    } catch {
+      // 读取初始页失败时回退到新建页面，不能阻断签到。
+    }
+  }
   const pending = browser.newPage()
   try {
     return await withTimeout(pending, ms, '打开页面超时')
@@ -242,7 +253,7 @@ function parseProxy(proxyUrl) {
  * 取该模式的浏览器实例（不存在则启动）。同模式并发任务共享同一次启动过程，
  * 不再因模式不同而互相关闭实例
  */
-async function getBrowser(pool, proxy, { interactive = false, profileKey = '' } = {}) {
+async function getBrowser(pool, proxy, { interactive = false, profileKey = '', executablePath = null } = {}) {
   if (isBrowserAlive(pool.instance)) return pool.instance
   if (!pool.launching) {
     pool.launching = (async () => {
@@ -288,7 +299,6 @@ async function getBrowser(pool, proxy, { interactive = false, profileKey = '' } 
         // 高于允许的等待上限，否则默认 120 秒的可见验证会在 90 秒被提前掐断。
         protocolTimeout: interactive ? 660000 : 150000
       }
-      const executablePath = resolveBrowserExecutable(getConfig().browser.executablePath)
       if (executablePath) {
         launchOptions.executablePath = executablePath
         logger.info(`[relay-checkin-plugin] 使用系统浏览器内核: ${executablePath}`)
@@ -296,8 +306,13 @@ async function getBrowser(pool, proxy, { interactive = false, profileKey = '' } 
         logger.warn('[relay-checkin-plugin] 未找到系统 Chrome/Edge，将使用 Puppeteer 自带 Chromium；Turnstile 可能拒绝过旧内核')
       }
       if (interactive) {
-        const userDataDir = interactiveProfilePath(profileKey, proxy?.server)
+        const userDataDir = interactiveProfilePath(
+          profileKey,
+          proxy?.server,
+          executablePath || 'puppeteer-bundled'
+        )
         fs.mkdirSync(userDataDir, { recursive: true })
+        logger.info(`[relay-checkin-plugin] 可见浏览器隔离档案: ${userDataDir}`)
         launchOptions.userDataDir = userDataDir
         launchOptions.defaultViewport = null
         launchOptions.ignoreDefaultArgs = ['--enable-automation']
@@ -543,7 +558,13 @@ async function withPage(host, fn, { interactive = false, profileKey = host, trac
   // 外层只负责槽位：内部任何异常（含取配置/解析代理失败）都不会漏掉释放
   try {
     const proxy = parseProxy(proxyForHost(host, true))
-    const poolKey = browserPoolKey({ interactive, proxyServer: proxy?.server, profileKey })
+    const executablePath = resolveBrowserExecutable(getConfig().browser.executablePath)
+    const poolKey = browserPoolKey({
+      interactive,
+      proxyServer: proxy?.server,
+      profileKey,
+      executablePath: executablePath || 'puppeteer-bundled'
+    })
     const pool = getPool(poolKey, interactive)
     if (pool.idleTimer) {
       clearTimeout(pool.idleTimer)
@@ -554,11 +575,18 @@ async function withPage(host, fn, { interactive = false, profileKey = host, trac
     try {
       logger.info(`[relay-checkin-plugin] ${interactive ? '可见' : '无头'}浏览器方案启动: ${host}${proxy ? ` (代理 ${proxy.server})` : ' (直连)'}`)
       const browser = await withTimeout(
-        getBrowser(pool, proxy, { interactive, profileKey }),
+        getBrowser(pool, proxy, { interactive, profileKey, executablePath }),
         70000,
         `${interactive ? '可见' : '无头'}浏览器启动超时（检查 puppeteer 与图形桌面是否可用）`
       )
-      page = await newPageSafe(browser, 30000)
+      const engineVersion = typeof browser.version === 'function'
+        ? await withTimeout(browser.version(), 5000, '读取浏览器内核版本超时').catch(() => '')
+        : ''
+      if (engineVersion) logger.info(`[relay-checkin-plugin] 浏览器内核版本: ${engineVersion}`)
+      page = await newPageSafe(browser, 30000, {
+        // Chrome 启动时已有 about:blank；直接复用可避免可见窗口多出一个白屏标签页。
+        reuseBlank: interactive && pool.activeTasks === 1
+      })
       logger.info('[relay-checkin-plugin] 浏览器页面就绪，开始初始化')
       // 以下都是本地 CDP 调用，正常都是毫秒级；浏览器无响应时必须超时而不是静默挂死
       if (proxy?.auth) await withTimeout(page.authenticate(proxy.auth), 15000, '设置代理认证超时')
@@ -1165,26 +1193,29 @@ function boundedSeconds(value, fallback, min, max) {
   return Math.max(min, Math.min(Number.isFinite(n) ? n : fallback, max))
 }
 
+export function turnstileBrowserMode(browser = {}) {
+  return browser.turnstileInteractive === false ? 'headless' : 'interactive'
+}
+
 /**
- * 手动指令的浏览器总预算：覆盖排队、启动/导航余量、无头尝试和可见验证。
+ * 手动指令的浏览器总预算：可见接管开启时直接走可见模式；关闭时才走无头模式。
  * 由调用层和测试共用，避免两处 clamp 漂移后外层先于浏览器超时。
  */
 export function browserHangBudgetMs(browser = {}) {
   const slotSec = boundedSeconds(browser.slotWaitSec, 120, 30, 600)
   const quickSec = boundedSeconds(browser.turnstileTimeoutSec, 30, 5, 120)
-  const interactiveEnabled = browser.turnstileInteractive !== false
+  const interactiveEnabled = turnstileBrowserMode(browser) === 'interactive'
   const interactiveSec = !interactiveEnabled
     ? 0
     : boundedSeconds(browser.turnstileInteractiveTimeoutSec, 120, 30, 600)
-  const phases = interactiveEnabled ? 2 : 1
-  // 每阶段 300 秒覆盖 launch/newPage/初始化/导航/接口提交/关闭的硬超时余量；
-  // 无头和可见阶段分别调用 withPage，繁忙时也可能各排队一次。
-  return (slotSec * phases + quickSec + interactiveSec + 300 * phases) * 1000
+  const activeSec = interactiveEnabled ? interactiveSec : quickSec
+  // 300 秒覆盖 launch/newPage/初始化/导航/接口提交/关闭的硬超时余量。
+  return (slotSec + activeSec + 300) * 1000
 }
 
 /**
- * Turnstile 站点浏览器签到：先做一次无头快速尝试；未获 token 时升级到持久档案的
- * 可见浏览器，让 Cloudflare 自动放行或由机器人运行设备上的用户完成验证。
+ * Turnstile 站点浏览器签到：允许可见接管时直接使用持久可见浏览器，避免先进行一次
+ * 大概率失败的无头挑战并污染同一出口的风险评分；关闭可见接管时才使用无头模式。
  * @param {object} account 账号
  * @param {object} opts { checkinPath: 签到接口路径, headers: 鉴权请求头, siteKey: Turnstile site key }
  * @returns {Promise<{status: number, json: object|null}|{turnstileFailed: true}>}
@@ -1194,6 +1225,34 @@ export async function turnstileCheckin(account, { checkinPath, headers, siteKey 
   const host = new URL(account.baseUrl).hostname
   const quickTimeoutSec = boundedSeconds(cfg.browser.turnstileTimeoutSec, 30, 5, 120)
   const interactiveTimeoutSec = boundedSeconds(cfg.browser.turnstileInteractiveTimeoutSec, 120, 30, 600)
+
+  if (turnstileBrowserMode(cfg.browser) === 'interactive') {
+    logger.info(`[relay-checkin-plugin] 将直接打开可见浏览器处理 ${host}，请在机器人运行设备上于 ${interactiveTimeoutSec} 秒内完成验证`)
+    let interactive
+    try {
+      interactive = await runTurnstileAttempt(
+        account,
+        { checkinPath, headers, siteKey },
+        { interactive: true, timeoutSec: interactiveTimeoutSec }
+      )
+    } catch (err) {
+      const detail = err?.message || String(err)
+      interactive = {
+        turnstileFailed: true,
+        message: `无法启动或使用可见浏览器：${detail}`,
+        detail: { stage: 'interactive-browser', reason: 'exception', detail }
+      }
+    }
+
+    const ok = browserResultOk(interactive)
+    noteResult(host, ok)
+    if (interactive.turnstileFailed) {
+      logger.warn(`[relay-checkin-plugin] Turnstile 可见浏览器接管未完成: ${interactive.message}`)
+    } else {
+      logger.info('[relay-checkin-plugin] Turnstile 已通过可见浏览器完成并提交签到')
+    }
+    return interactive
+  }
 
   let quick
   try {
@@ -1216,40 +1275,12 @@ export async function turnstileCheckin(account, { checkinPath, headers, siteKey 
   }
 
   logger.info(`[relay-checkin-plugin] Turnstile 无头尝试未通过: ${quick.message}`)
-  if (cfg.browser.turnstileInteractive === false) {
-    const result = {
-      ...quick,
-      message: `${quick.message}；可见浏览器接管已在配置中关闭`
-    }
-    noteResult(host, false)
-    return result
+  const result = {
+    ...quick,
+    message: `${quick.message}；可见浏览器接管已在配置中关闭`
   }
-
-  logger.info(`[relay-checkin-plugin] 将打开可见浏览器接管 ${host}，请在机器人运行设备上于 ${interactiveTimeoutSec} 秒内完成验证`)
-  let interactive
-  try {
-    interactive = await runTurnstileAttempt(
-      account,
-      { checkinPath, headers, siteKey },
-      { interactive: true, timeoutSec: interactiveTimeoutSec }
-    )
-  } catch (err) {
-    const detail = err?.message || String(err)
-    interactive = {
-      turnstileFailed: true,
-      message: `无法启动或使用可见浏览器：${detail}`,
-      detail: { stage: 'interactive-browser', reason: 'exception', detail }
-    }
-  }
-
-  const ok = browserResultOk(interactive)
-  noteResult(host, ok)
-  if (interactive.turnstileFailed) {
-    logger.warn(`[relay-checkin-plugin] Turnstile 可见浏览器接管未完成: ${interactive.message}`)
-  } else {
-    logger.info(`[relay-checkin-plugin] Turnstile 已通过可见浏览器完成并提交签到`)
-  }
-  return interactive
+  noteResult(host, false)
+  return result
 }
 
 /**
