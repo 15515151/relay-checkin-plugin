@@ -39,19 +39,24 @@ security:
   # 默认禁止本机/内网/链路本地地址；确需访问私有站点时填写精确域名或 *.example.com
   allowedPrivateHosts: []
 
-# 无头浏览器方案（AnyRouter 过阿里云 WAF、Turnstile 站点自动降级签到）
+# 浏览器方案（AnyRouter 过阿里云 WAF、Turnstile 站点自动降级签到）
 browser:
   enable: true
   # 等待 WAF 放行的最长时间（秒）；anyrouter 的阿里云 WAF 较慢，不够时可加大
   wafTimeoutSec: 60
-  # 等待 Turnstile 挑战完成的最长时间（秒）
+  # Turnstile 无头快速尝试的最长时间（秒），范围 5~120；失败后不再无效刷新
   turnstileTimeoutSec: 30
+  # 无头尝试失败后，是否在机器人运行设备上打开可见浏览器接管
+  # 可见窗口使用持久用户档案；Cloudflare 自动放行时无需操作，否则需人工完成一次验证
+  turnstileInteractive: true
+  # 等待可见浏览器完成 Turnstile 的最长时间（秒），范围 30~600
+  turnstileInteractiveTimeoutSec: 120
   # 浏览器空闲多久后自动关闭（秒）
   idleCloseSec: 300
   # 全局同时打开的浏览器页面上限（每页约数十 MB 内存），超出的任务排队；上限 10
   maxConcurrentPages: 2
   # 排队等待浏览器空闲的最长时间（秒），超时该账号本次判定失败；范围 30~600
-  # 手动指令的整体超时会自动取「本值 + 120 秒」，无需另行配置
+  # 手动指令的整体超时会自动覆盖排队、无头尝试和可见验证，无需另行配置
   slotWaitSec: 120
 
 # 只发 #中转添加 地址 发起绑定后的私聊补发流程
@@ -66,7 +71,7 @@ bind:
 # 代理设置（anyrouter.top 等站点国内网络无法直连时配置）
 proxy:
   # 代理地址，支持 http 代理（如 Clash: http://127.0.0.1:7890），可带账密 http://user:pass@host:port
-  # 留空 = 不使用代理；无头浏览器方案同样走此代理
+  # 留空 = 不使用代理；无头和可见浏览器方案同样走此代理
   url: ""
   # 需要走代理的站点域名关键字（按包含匹配）；留空数组 = 配置了代理后全部站点走代理
   hosts:

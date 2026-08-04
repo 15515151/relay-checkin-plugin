@@ -1,24 +1,48 @@
-import { getConfig } from './config.js'
+import fs from 'node:fs'
+import path from 'node:path'
+import crypto from 'node:crypto'
+import { DATA_PATH, getConfig } from './config.js'
 import { proxyForHost } from './adapters/common.js'
 import { assertSafeRequestUrl } from './url-security.js'
 
 /**
- * 无头浏览器工具：用于过阿里云 WAF（AnyRouter 系）与 Cloudflare Turnstile 挑战。
+ * 浏览器工具：用于过阿里云 WAF（AnyRouter 系）与 Cloudflare Turnstile 挑战。
  * puppeteer 惰性加载（复用 Yunzai 根目录依赖，缺失时仅浏览器功能不可用，不影响插件加载）。
  *
- * 按代理模式分池持有实例：direct（直连）与每个代理地址各一个浏览器，各自独立计数与空闲回收。
+ * 无头实例按代理模式复用；可见实例按站点与代理模式隔离，并使用持久用户档案。
  * 这样直连站与代理站可同时进行，任何站点都不会被迫用错的网络模式访问
  * （带账密代理的认证走 page.authenticate，chromium 的 --proxy-server 不接受账密）。
  */
 
-// Map<mode, { instance, activeTasks, idleTimer, launching }>，mode 为 'direct' 或代理地址
+// Map<poolKey, { instance, activeTasks, idleTimer, launching, interactive }>
 const pools = new Map()
 
-function getPool(mode) {
-  if (!pools.has(mode)) {
-    pools.set(mode, { instance: null, activeTasks: 0, idleTimer: null, launching: null })
+function getPool(poolKey, interactive = false) {
+  if (!pools.has(poolKey)) {
+    pools.set(poolKey, { instance: null, activeTasks: 0, idleTimer: null, launching: null, interactive })
   }
-  return pools.get(mode)
+  return pools.get(poolKey)
+}
+
+function profileFingerprint(profileKey, proxyServer = '') {
+  return crypto.createHash('sha256')
+    .update(`${String(profileKey).toLowerCase()}\n${proxyServer || 'direct'}`)
+    .digest('hex')
+    .slice(0, 20)
+}
+
+/**
+ * 导出纯逻辑辅助函数供冒烟测试验证池隔离和档案路径稳定性。
+ */
+export function browserPoolKey({ interactive = false, proxyServer = '', profileKey = '' } = {}) {
+  const route = proxyServer || 'direct'
+  return interactive
+    ? `interactive|${profileFingerprint(profileKey, route)}`
+    : `headless|${route}`
+}
+
+export function interactiveProfilePath(profileKey, proxyServer = '') {
+  return path.join(DATA_PATH, 'browser-profile', profileFingerprint(profileKey, proxyServer || 'direct'))
 }
 
 /**
@@ -167,26 +191,35 @@ function parseProxy(proxyUrl) {
  * 取该模式的浏览器实例（不存在则启动）。同模式并发任务共享同一次启动过程，
  * 不再因模式不同而互相关闭实例
  */
-async function getBrowser(pool, proxy) {
+async function getBrowser(pool, proxy, { interactive = false, profileKey = '' } = {}) {
   if (isBrowserAlive(pool.instance)) return pool.instance
   if (!pool.launching) {
     pool.launching = (async () => {
+      if (interactive && process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+        throw new Error('当前 Linux 环境没有图形桌面（DISPLAY/WAYLAND_DISPLAY），无法打开可见浏览器')
+      }
       const puppeteer = await getPuppeteer()
       const args = [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-blink-features=AutomationControlled',
-        // 控制资源占用：WAF 挑战页会 JS 自刷新，不限制时可能吃满 CPU/内存
-        // 把宿主机拖到无法调度（表现为整个机器人卡死、定时器都不触发）
-        '--disable-gpu',
-        '--disable-extensions',
-        '--disable-background-networking',
         '--disable-features=TranslateUI,BackForwardCache',
-        '--renderer-process-limit=1',
-        '--js-flags=--max-old-space-size=256',
-        '--no-first-run'
+        '--no-first-run',
+        '--no-default-browser-check'
       ]
+      if (interactive) {
+        args.push('--start-maximized', '--window-size=1200,860')
+      } else {
+        // 无头 WAF 页面会持续执行挑战脚本，限制单实例资源占用。
+        args.push(
+          '--disable-gpu',
+          '--disable-extensions',
+          '--disable-background-networking',
+          '--renderer-process-limit=1',
+          '--js-flags=--max-old-space-size=256'
+        )
+      }
       if (proxy?.server) {
         args.push(`--proxy-server=${proxy.server}`)
         // 让 Chrome 到代理自身（本机回环）的连接不再经过代理，
@@ -195,12 +228,22 @@ async function getBrowser(pool, proxy) {
       }
       // protocolTimeout 给所有 CDP 调用兜底（setCookie/evaluate 等在浏览器无响应时
       // 会永久挂起且不受 launch 的 timeout 约束）；timeout 管启动连接本身
-      return await puppeteer.launch({
-        headless: 'new',
+      const launchOptions = {
+        headless: interactive ? false : 'new',
         args,
         timeout: 60000,
-        protocolTimeout: 90000
-      })
+        // solveTurnstile 的 page.evaluate 会一直等到 token 或配置超时；CDP 超时必须
+        // 高于允许的等待上限，否则默认 120 秒的可见验证会在 90 秒被提前掐断。
+        protocolTimeout: interactive ? 660000 : 150000
+      }
+      if (interactive) {
+        const userDataDir = interactiveProfilePath(profileKey, proxy?.server)
+        fs.mkdirSync(userDataDir, { recursive: true })
+        launchOptions.userDataDir = userDataDir
+        launchOptions.defaultViewport = null
+        launchOptions.ignoreDefaultArgs = ['--enable-automation']
+      }
+      return await puppeteer.launch(launchOptions)
     })().then(inst => {
       pool.instance = inst
       pool.launching = null
@@ -309,14 +352,14 @@ async function installNavigationGuard(page) {
   })
 }
 
-async function withPage(host, fn) {
+async function withPage(host, fn, { interactive = false, profileKey = host, trackResult = true } = {}) {
   checkBreaker(host)
   await acquirePageSlot()
   // 外层只负责槽位：内部任何异常（含取配置/解析代理失败）都不会漏掉释放
   try {
     const proxy = parseProxy(proxyForHost(host, true))
-    const mode = proxy?.server || 'direct'
-    const pool = getPool(mode)
+    const poolKey = browserPoolKey({ interactive, proxyServer: proxy?.server, profileKey })
+    const pool = getPool(poolKey, interactive)
     if (pool.idleTimer) {
       clearTimeout(pool.idleTimer)
       pool.idleTimer = null
@@ -324,8 +367,12 @@ async function withPage(host, fn) {
     pool.activeTasks++
     let page = null
     try {
-      logger.info(`[relay-checkin-plugin] 浏览器方案启动: ${host}${proxy ? ` (代理 ${proxy.server})` : ' (直连)'}`)
-      const browser = await withTimeout(getBrowser(pool, proxy), 70000, '启动浏览器超时（检查 puppeteer 是否可用）')
+      logger.info(`[relay-checkin-plugin] ${interactive ? '可见' : '无头'}浏览器方案启动: ${host}${proxy ? ` (代理 ${proxy.server})` : ' (直连)'}`)
+      const browser = await withTimeout(
+        getBrowser(pool, proxy, { interactive, profileKey }),
+        70000,
+        `${interactive ? '可见' : '无头'}浏览器启动超时（检查 puppeteer 与图形桌面是否可用）`
+      )
       page = await newPageSafe(browser, 30000)
       logger.info('[relay-checkin-plugin] 浏览器页面就绪，开始初始化')
       // 以下都是本地 CDP 调用，正常都是毫秒级；浏览器无响应时必须超时而不是静默挂死
@@ -336,18 +383,20 @@ async function withPage(host, fn) {
       await withTimeout(page.setExtraHTTPHeaders({ 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' }), 15000, '设置浏览器语言超时')
       await withTimeout(page.evaluateOnNewDocument(STEALTH_SCRIPT), 15000, '注入初始化脚本超时（浏览器无响应）')
       await installNavigationGuard(page)
+      if (interactive) await withTimeout(page.bringToFront(), 15000, '显示浏览器窗口超时')
       logger.info('[relay-checkin-plugin] 页面初始化完成')
       const out = await fn(page)
-      noteResult(host, browserResultOk(out))
+      if (trackResult) noteResult(host, browserResultOk(out))
       return out
     } catch (err) {
-      noteResult(host, false)
+      if (trackResult) noteResult(host, false)
       throw err
     } finally {
       // 关闭也可能挂起（挑战页忙循环等），必须带超时否则计数永久失衡
       if (page) await withTimeout(page.close(), 15000, '关闭页面超时').catch(() => {})
       pool.activeTasks--
-      scheduleIdleClose(pool)
+      // 可见窗口完成后尽快退出；用户档案已经落盘，下次仍能复用信任状态。
+      scheduleIdleClose(pool, interactive ? 1000 : null)
     }
   } finally {
     releasePageSlot()
@@ -462,13 +511,15 @@ export async function fetchWafCookies(account) {
  * 在站点页面上下文内渲染 Cloudflare Turnstile 挑战并获取 token
  * @returns {Promise<{token: string|null, stage: string, reason: string, errorCode?: string, detail?: string}>}
  */
-async function solveTurnstile(page, siteKey, timeoutSec) {
+async function solveTurnstile(page, siteKey, timeoutSec, { interactive = false, host = '' } = {}) {
   try {
-    return await page.evaluate(async ({ siteKey, timeoutSec }) => {
+    return await page.evaluate(async ({ siteKey, timeoutSec, interactive, host }) => {
       const deadline = Date.now() + timeoutSec * 1000
       const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
       const responseInput = () => document.querySelector('input[name="cf-turnstile-response"]')?.value || ''
-      const existingWidget = document.querySelector('.cf-turnstile, [data-sitekey]')
+      // 可见模式始终渲染自己的组件，确保用户看到的是当前签到所需的验证；
+      // 无头模式优先复用站点组件，保留站点可能附带的 action / cData。
+      const existingWidget = interactive ? null : document.querySelector('.cf-turnstile, [data-sitekey]')
 
       // 优先等待站点自己的组件，以保留 action / cData 等站点参数。
       if (existingWidget) {
@@ -502,11 +553,47 @@ async function solveTurnstile(page, siteKey, timeoutSec) {
           }
         }
 
-        const el = document.createElement('div')
-        el.style.minHeight = '70px'
-        el.style.display = 'grid'
-        el.style.placeItems = 'center'
-        document.body.appendChild(el)
+        let el = null
+        let statusEl = null
+        if (interactive) {
+          const overlay = document.createElement('div')
+          overlay.id = 'relay-checkin-turnstile'
+          overlay.style.cssText = [
+            'position:fixed', 'inset:0', 'z-index:2147483647', 'display:grid',
+            'place-items:center', 'background:#f3f1ea', 'color:#18231d',
+            'font-family:"Microsoft YaHei","PingFang SC",sans-serif'
+          ].join(';')
+          const panel = document.createElement('main')
+          panel.style.cssText = [
+            'width:min(520px,calc(100vw - 40px))', 'box-sizing:border-box',
+            'padding:34px 38px', 'background:#fff', 'border:1px solid #cad0c8',
+            'box-shadow:0 18px 50px rgba(30,42,35,.16)', 'text-align:center'
+          ].join(';')
+          const title = document.createElement('h1')
+          title.textContent = '中转站签到验证'
+          title.style.cssText = 'margin:0 0 10px;font-size:24px;font-weight:700;letter-spacing:0'
+          const site = document.createElement('div')
+          site.textContent = host
+          site.style.cssText = 'margin-bottom:18px;color:#587063;font-size:14px;word-break:break-all'
+          const tip = document.createElement('p')
+          tip.textContent = `请在 ${timeoutSec} 秒内完成下方验证。验证通过后会立即提交签到并自动关闭窗口。`
+          tip.style.cssText = 'margin:0 0 24px;line-height:1.7;font-size:15px;color:#303b35'
+          el = document.createElement('div')
+          el.style.cssText = 'min-height:70px;display:grid;place-items:center'
+          statusEl = document.createElement('p')
+          statusEl.textContent = '等待验证...'
+          statusEl.style.cssText = 'margin:20px 0 0;color:#6a746e;font-size:13px'
+          panel.append(title, site, tip, el, statusEl)
+          overlay.appendChild(panel)
+          document.body.appendChild(overlay)
+          document.title = `请完成签到验证 - ${host}`
+        } else {
+          el = document.createElement('div')
+          el.style.minHeight = '70px'
+          el.style.display = 'grid'
+          el.style.placeItems = 'center'
+          document.body.appendChild(el)
+        }
         el.scrollIntoView({ block: 'center', inline: 'center' })
 
         const left = Math.max(1000, deadline - Date.now())
@@ -523,7 +610,10 @@ async function solveTurnstile(page, siteKey, timeoutSec) {
             window.turnstile.render(el, {
               sitekey: siteKey,
               theme: 'light',
-              callback: token => finish({ token, stage: 'explicit-widget', reason: 'token' }),
+              callback: token => {
+                if (statusEl) statusEl.textContent = '验证通过，正在提交签到...'
+                finish({ token, stage: 'explicit-widget', reason: 'token' })
+              },
               'error-callback': code => finish({
                 token: null,
                 stage: 'explicit-widget',
@@ -540,56 +630,129 @@ async function solveTurnstile(page, siteKey, timeoutSec) {
       } catch (err) {
         return { token: null, stage: 'script', reason: 'exception', detail: String(err) }
       }
-    }, { siteKey, timeoutSec })
+    }, { siteKey, timeoutSec, interactive, host })
   } catch (err) {
     return { token: null, stage: 'page', reason: 'evaluate-error', detail: String(err?.message || err) }
   }
 }
 
-function turnstileFailureMessage(result, timeoutSec) {
+function turnstileFailureMessage(result, timeoutSec, interactive = false) {
   if (result?.reason === 'error-callback') {
     return `Turnstile 返回错误回调${result.errorCode ? `（错误码 ${result.errorCode}）` : ''}`
   }
   if (result?.stage === 'script') return 'Turnstile 脚本未能正常加载或初始化'
   if (result?.reason === 'render-error' || result?.reason === 'evaluate-error') return 'Turnstile 组件执行异常'
   if (result?.reason === 'expired') return 'Turnstile token 在提交前已过期'
-  return `Turnstile 在 ${timeoutSec} 秒内未签发 token（通常需要人工交互，或无头浏览器被拒绝）`
+  return interactive
+    ? `Turnstile 在 ${timeoutSec} 秒内未完成，请在机器人运行设备弹出的浏览器窗口中完成验证`
+    : `Turnstile 在 ${timeoutSec} 秒内未签发 token（无头浏览器未获放行）`
 }
 
 /**
- * Turnstile 站点浏览器签到：打开站点 → 渲染挑战拿 token → 带 token 调签到接口
+ * 在一种浏览器模式内完成 Turnstile 获取与签到提交。token 由 Cloudflare 绑定当前
+ * 浏览器上下文和出口网络，因此必须在同一个页面里立即提交，不能跨模式搬运。
+ */
+async function runTurnstileAttempt(account, { checkinPath, headers, siteKey }, { interactive, timeoutSec }) {
+  const host = new URL(account.baseUrl).hostname
+  return await withPage(host, async page => {
+    await withTimeout(page.setBypassCSP(true), 15000, '设置 Turnstile 页面策略超时')
+    await withTimeout(
+      page.goto(account.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }),
+      40000, '打开站点页面超时（网络或代理不通）'
+    )
+
+    const attempt = await solveTurnstile(page, siteKey, timeoutSec, { interactive, host })
+    if (!attempt.token) {
+      return {
+        turnstileFailed: true,
+        message: turnstileFailureMessage(attempt, timeoutSec, interactive),
+        detail: attempt
+      }
+    }
+
+    const url = new URL(checkinPath, `${account.baseUrl}/`)
+    url.searchParams.set('turnstile', attempt.token)
+    return await pageFetch(page, url.toString(), { method: 'POST', headers })
+  }, { interactive, profileKey: host, trackResult: false })
+}
+
+function boundedSeconds(value, fallback, min, max) {
+  const n = Number(value)
+  return Math.max(min, Math.min(Number.isFinite(n) ? n : fallback, max))
+}
+
+/**
+ * 手动指令的浏览器总预算：覆盖排队、启动/导航余量、无头尝试和可见验证。
+ * 由调用层和测试共用，避免两处 clamp 漂移后外层先于浏览器超时。
+ */
+export function browserHangBudgetMs(browser = {}) {
+  const slotSec = boundedSeconds(browser.slotWaitSec, 120, 30, 600)
+  const quickSec = boundedSeconds(browser.turnstileTimeoutSec, 30, 5, 120)
+  const interactiveSec = browser.turnstileInteractive === false
+    ? 0
+    : boundedSeconds(browser.turnstileInteractiveTimeoutSec, 120, 30, 600)
+  const executionSec = Math.max(300, quickSec + interactiveSec + 120)
+  return (slotSec + executionSec) * 1000
+}
+
+/**
+ * Turnstile 站点浏览器签到：先做一次无头快速尝试；未获 token 时升级到持久档案的
+ * 可见浏览器，让 Cloudflare 自动放行或由机器人运行设备上的用户完成验证。
  * @param {object} account 账号
  * @param {object} opts { checkinPath: 签到接口路径, headers: 鉴权请求头, siteKey: Turnstile site key }
  * @returns {Promise<{status: number, json: object|null}|{turnstileFailed: true}>}
  */
 export async function turnstileCheckin(account, { checkinPath, headers, siteKey }) {
   const cfg = getConfig()
-  return await withPage(new URL(account.baseUrl).hostname, async page => {
-    await withTimeout(
-      page.goto(account.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }),
-      40000, '打开站点页面超时（网络或代理不通）'
+  const host = new URL(account.baseUrl).hostname
+  const quickTimeoutSec = boundedSeconds(cfg.browser.turnstileTimeoutSec, 30, 5, 120)
+  const interactiveTimeoutSec = boundedSeconds(cfg.browser.turnstileInteractiveTimeoutSec, 120, 30, 600)
+
+  const quick = await runTurnstileAttempt(
+    account,
+    { checkinPath, headers, siteKey },
+    { interactive: false, timeoutSec: quickTimeoutSec }
+  )
+  if (!quick.turnstileFailed) {
+    noteResult(host, browserResultOk(quick))
+    return quick
+  }
+
+  logger.info(`[relay-checkin-plugin] Turnstile 无头尝试未通过: ${quick.message}`)
+  if (cfg.browser.turnstileInteractive === false) {
+    const result = {
+      ...quick,
+      message: `${quick.message}；可见浏览器接管已在配置中关闭`
+    }
+    noteResult(host, false)
+    return result
+  }
+
+  logger.info(`[relay-checkin-plugin] 将打开可见浏览器接管 ${host}，请在机器人运行设备上于 ${interactiveTimeoutSec} 秒内完成验证`)
+  let interactive
+  try {
+    interactive = await runTurnstileAttempt(
+      account,
+      { checkinPath, headers, siteKey },
+      { interactive: true, timeoutSec: interactiveTimeoutSec }
     )
-
-    const timeoutSec = cfg.browser.turnstileTimeoutSec || 30
-    // 首次失败多为脚本加载/评分抖动，重载页面再试一次
-    let attempt = await solveTurnstile(page, siteKey, timeoutSec)
-    if (!attempt.token) {
-      logger.info(`[relay-checkin-plugin] Turnstile 首次未通过: ${turnstileFailureMessage(attempt, timeoutSec)}；重载页面重试`)
-      await withTimeout(
-        page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }),
-        40000, '重载页面超时'
-      ).catch(() => {})
-      attempt = await solveTurnstile(page, siteKey, timeoutSec)
+  } catch (err) {
+    const detail = err?.message || String(err)
+    interactive = {
+      turnstileFailed: true,
+      message: `无法启动或使用可见浏览器：${detail}`,
+      detail: { stage: 'interactive-browser', reason: 'exception', detail }
     }
-    if (!attempt.token) {
-      const message = turnstileFailureMessage(attempt, timeoutSec)
-      logger.warn(`[relay-checkin-plugin] Turnstile 最终未通过: ${message}`)
-      return { turnstileFailed: true, message, detail: attempt }
-    }
+  }
 
-    const url = `${account.baseUrl}${checkinPath}?turnstile=${encodeURIComponent(attempt.token)}`
-    return await pageFetch(page, url, { method: 'POST', headers })
-  })
+  const ok = browserResultOk(interactive)
+  noteResult(host, ok)
+  if (interactive.turnstileFailed) {
+    logger.warn(`[relay-checkin-plugin] Turnstile 可见浏览器接管未完成: ${interactive.message}`)
+  } else {
+    logger.info(`[relay-checkin-plugin] Turnstile 已通过可见浏览器完成并提交签到`)
+  }
+  return interactive
 }
 
 /**

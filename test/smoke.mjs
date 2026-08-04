@@ -35,6 +35,9 @@ try {
   assert.deepEqual(cfg.schedule.accountDelay, [5, 15])
   assert.equal(cfg.browser.enable, true)
   assert.equal(cfg.browser.wafTimeoutSec, 60)
+  assert.equal(cfg.browser.turnstileTimeoutSec, 30)
+  assert.equal(cfg.browser.turnstileInteractive, true)
+  assert.equal(cfg.browser.turnstileInteractiveTimeoutSec, 120)
   assert.equal(cfg.bind.timeoutSec, 300)
   assert.equal(cfg.bind.groupRecallSec, 60)
   assert.equal(cfg.proxy.url, '')
@@ -45,15 +48,58 @@ try {
   assert.equal(cfg.security.allowHttp, false)
   assert.deepEqual(cfg.security.allowedPrivateHosts, [])
   assert.equal(cfg.browser.maxConcurrentPages, 2)
-  // 手动指令的整体超时预算 = slotWaitSec + 120s，必须严格大于排队上限，
+  // 手动指令的整体超时预算必须覆盖排队、无头尝试与可见验证，
   // 否则会出现「已告知失败但任务稍后真的执行了」的矛盾结果
   assert.equal(cfg.browser.slotWaitSec, 120)
-  assert.ok(cfg.browser.slotWaitSec + 120 > cfg.browser.slotWaitSec)
+  assert.ok(
+    cfg.browser.slotWaitSec + cfg.browser.turnstileTimeoutSec +
+      cfg.browser.turnstileInteractiveTimeoutSec + 120 > cfg.browser.slotWaitSec
+  )
   const cfgText = fs.readFileSync(path.join(DATA, 'config.yaml'), 'utf-8')
   assert.ok(cfgText.includes('proxy:') && cfgText.includes('groupRecallSec'), '新增配置项应写回配置文件')
+  assert.ok(cfgText.includes('turnstileInteractiveTimeoutSec'), '交互式 Turnstile 新配置应写回旧配置文件')
   assert.ok(cfgText.includes('0 0 9 * * *') && cfgText.includes('mode: private'), '写回后用户值应保留')
   assert.ok(cfgText.includes('# 代理设置'), '模板注释应保留')
   console.log('config OK')
+
+  // ---- browser pool/profile pure logic ----
+  const { browserPoolKey, interactiveProfilePath, browserHangBudgetMs } = await import('../models/browser.js')
+  assert.equal(
+    browserPoolKey({ proxyServer: '', profileKey: 'ioll.pp.ua' }),
+    'headless|direct',
+    '无头浏览器应按网络出口复用'
+  )
+  assert.notEqual(
+    browserPoolKey({ interactive: true, profileKey: 'ioll.pp.ua' }),
+    browserPoolKey({ interactive: true, profileKey: 'free.sulmate.cn' }),
+    '可见浏览器档案必须按站点隔离'
+  )
+  assert.notEqual(
+    browserPoolKey({ interactive: true, profileKey: 'ioll.pp.ua' }),
+    browserPoolKey({ interactive: true, profileKey: 'ioll.pp.ua', proxyServer: 'http://127.0.0.1:7897' }),
+    '可见浏览器档案必须按代理出口隔离'
+  )
+  assert.equal(
+    interactiveProfilePath('ioll.pp.ua'),
+    interactiveProfilePath('ioll.pp.ua'),
+    '相同站点和出口的档案路径必须稳定'
+  )
+  assert.ok(
+    interactiveProfilePath('ioll.pp.ua').startsWith(path.join(DATA, 'browser-profile')),
+    '持久浏览器档案必须保存在已忽略提交的 data 目录'
+  )
+  assert.equal(browserHangBudgetMs(cfg.browser), 420000, '默认总预算应覆盖 120 秒排队和完整浏览器流程')
+  assert.equal(
+    browserHangBudgetMs({
+      slotWaitSec: 600,
+      turnstileTimeoutSec: 120,
+      turnstileInteractive: true,
+      turnstileInteractiveTimeoutSec: 600
+    }),
+    1440000,
+    '配置取最大值时总预算仍必须覆盖两阶段等待与启动余量'
+  )
+  console.log('browser profile OK')
 
   // ---- adapters/common ----
   const { quotaToUsd, parseUserInfo, parseCheckinResult, deriveAwardQuota, matchProxy } = await import('../models/adapters/common.js')

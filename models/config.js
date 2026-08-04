@@ -51,6 +51,8 @@ const DEFAULT_CONFIG = {
     enable: true,
     wafTimeoutSec: 60,
     turnstileTimeoutSec: 30,
+    turnstileInteractive: true,
+    turnstileInteractiveTimeoutSec: 120,
     idleCloseSec: 300,
     maxConcurrentPages: 2,
     slotWaitSec: 120

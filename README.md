@@ -89,22 +89,27 @@ AnyRouter 同理（`#中转添加cookie anyrouter.top <session值> <用户ID>`�
   - 不再要求签到用户曾在目标群使用插件，也不按目标群成员过滤
   - 一个群都没推成功时（未配置目标群 / 机器人已退群或被禁言）自动**私聊兜底**，不会静默丢结果
 - `push.usersPerImage`：群合并转发每张图最多展示的用户数（默认 5）
-- `browser.enable`：无头浏览器方案开关（AnyRouter 过 WAF、Turnstile 站点降级签到）
+- `browser.enable`：浏览器方案总开关（AnyRouter 过 WAF、Turnstile 站点降级签到）
+- `browser.turnstileTimeoutSec`：Turnstile 无头快速尝试时间（默认 30 秒，范围 5~120）。未获 token 时不会再刷新后重复空等
+- `browser.turnstileInteractive`：无头尝试失败后是否打开可见浏览器接管（默认开启）。可见模式按站点和代理使用独立持久档案，Cloudflare 自动放行时无需操作，否则需在机器人运行设备上完成验证
+- `browser.turnstileInteractiveTimeoutSec`：可见浏览器等待验证的时间（默认 120 秒，范围 30~600）
 - `request.retry`：只读请求网络失败后的重试次数（默认 2）；签到 `POST` 通常只发送一次，响应不确定时改用状态接口复核。仅当站点明确返回缺少 `X-Game-*` 完整性标记时，才会补齐该标记再发一次
 - `security.allowHttp`：是否允许添加 HTTP 站点（默认 `false`）
 - `security.allowedPrivateHosts`：允许访问的本机/内网站点例外列表，支持精确域名和 `*.example.com`；只应由机器人主人配置
 - `bind.timeoutSec`：发起绑定后等待私聊补发凭据的超时秒数（默认 300）
 - `bind.groupRecallSec`：群内绑定提示/回执消息自动撤回秒数，防多人使用刷屏（默认 60，0 不撤回；QQ 限制最大 120）。绑定出结果（成功/失败/超时）时提示消息会立即撤回，该秒数是未出结果时的兜底
 - `schedule.concurrency`：定时任务同时处理的用户数（默认 3，上限 10）。单用户内部仍逐账号串行，人多可调大，服务器配置低则调小
-- `browser.maxConcurrentPages`：全局同时打开的无头浏览器页面上限（默认 2，上限 10）。每页约数十 MB 内存，超出的任务排队
+- `browser.maxConcurrentPages`：全局同时打开的浏览器页面上限（默认 2，上限 10）。每页约数十 MB 内存，超出的任务排队
 - `browser.slotWaitSec`：排队等待浏览器空闲的最长时间（默认 120 秒），超时该账号本次判定失败
-- `proxy.url`：代理地址（anyrouter.top 等国内无法直连的站点用），如 Clash 的 `http://127.0.0.1:7890`，支持 `http://user:pass@host:port`；留空不使用。无头浏览器方案同样走此代理
+- `proxy.url`：代理地址（anyrouter.top 等国内无法直连的站点用），如 Clash 的 `http://127.0.0.1:7890`，支持 `http://user:pass@host:port`；留空不使用。无头和可见浏览器均使用同一代理，确保 Turnstile token 与签到提交走同一出口
 - `proxy.hosts`：需要走代理的站点域名关键字（包含匹配），默认 `[anyrouter]`；留空数组则配置代理后全部站点走代理
 - `recallAdd`：群里发含令牌的添加指令后是否尝试撤回消息
 
 ## 已知限制
 
-- Turnstile 浏览器方案依赖 Cloudflare 对无头环境的评分，不能保证自动通过；要求点击或其他人工交互的挑战不会尝试绕过，会在结果与日志中提示超时阶段或组件错误码
+- Turnstile 会先进行一次无头快速尝试；失败后默认打开持久档案的可见浏览器，并在同一页面、同一代理出口下取得 token 后立即提交。持久档案能保留浏览器信任状态，但不能保证 Cloudflare 每次自动放行
+- 要求交互时，需在机器人运行设备弹出的窗口内完成验证；Linux 服务器必须有可用的 `DISPLAY` 或 `WAYLAND_DISPLAY`。纯命令行服务器无法显示窗口时会立即返回明确错误，可在配置中关闭 `browser.turnstileInteractive`
+- 插件不自动点击或绕过 Turnstile，也不默认接入第三方打码服务，避免向外部服务泄露站点地址、访问上下文或账号相关信息。因此无人值守定时任务遇到必须人工交互的挑战时仍可能失败
 - AnyRouter 的 WAF 策略可能变化，若持续提示「WAF 未放行」可稍后重试或提 issue
 - anyrouter.top 国内网络无法直连（报「网络请求失败: fetch failed」即是），需在 `data/config.yaml` 配置 `proxy.url` 代理（复用 Yunzai 自带的 https-proxy-agent，无需额外安装）
 - Cookie 方式的 session 有效期约 1 个月，失效后需重新添加；AgentRouter 邮箱模式会自动保存每次登录返回的新 Session

@@ -5,6 +5,7 @@ import { checkinEntry, checkinAccount, finalizeCheckinResult, queryEntry, refres
 import { withUserLock } from '../models/lock.js'
 import { renderResult, renderList, renderHelp } from '../models/render.js'
 import { runScheduledCheckin } from '../models/scheduler.js'
+import { browserHangBudgetMs } from '../models/browser.js'
 
 /**
  * 等待私聊补发凭据的绑定会话（key: QQ号字符串）
@@ -85,7 +86,7 @@ function progressTip(accounts) {
   const estText = estSec >= 60 ? `约 ${Math.ceil(estSec / 60)} 分钟` : `约 ${Math.max(5, Math.ceil(estSec / 5) * 5)} 秒`
   let tip = `正在为你的 ${total} 个账号依次签到，预计${estText}，完成后统一出图，请勿重复发送指令`
   if (heavy > 0) {
-    tip += `\n（其中 ${heavy} 个站点需过人机验证，走无头浏览器，耗时较长属正常）`
+    tip += `\n（其中 ${heavy} 个站点需浏览器验证，耗时较长属正常）`
   }
   return tip
 }
@@ -97,10 +98,7 @@ function progressTip(accounts) {
  */
 function hangBudgetMs() {
   try {
-    // 与 acquirePageSlot 同样 clamp（配置写成字符串/负数也不会失控）；
-    // 加数需覆盖单账号浏览器执行段的上界（启动+开页+打开站点+过 WAF+重试+关页 ≈ 266s）
-    const sec = Number(getConfig().browser.slotWaitSec) || 120
-    return (Math.max(30, Math.min(sec, 600)) + 300) * 1000
+    return browserHangBudgetMs(getConfig().browser)
   } catch {
     // 取配置失败（如 data 目录不可写）不能让调用方同步抛出：
     // 那会导致已在飞行的请求 promise 无人接管，触发 unhandledRejection 退进程
