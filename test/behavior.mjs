@@ -464,7 +464,11 @@ try {
   html = art(path.join(tplDir, 'help.html'), { time: 'T' })
   assert.ok(html.includes('#中转添加') && html.includes('#中转定时'))
   for (const file of ['help.html', 'list.html', 'result.html']) {
-    assert.match(fs.readFileSync(path.join(tplDir, file), 'utf8'), /zoom:\s*2/, `${file} 应使用 2 倍像素渲染`)
+    const source = fs.readFileSync(path.join(tplDir, file), 'utf8')
+    assert.match(source, /id="container"/, `${file} 应提供 TRSS 截图根节点`)
+    assert.match(source, /#container\s*\{[^}]*width:\s*800px/s, `${file} 应使用 800px 原生画布`)
+    assert.doesNotMatch(source, /\bzoom\s*:/, `${file} 不应使用会导致旧版 TRSS 截图裁切的 zoom`)
+    assert.doesNotMatch(source, /transform:\s*scale\s*\(/, `${file} 不应使用需要运行时配合的 CSS scale`)
   }
   assert.match(fs.readFileSync(path.join(ROOT, 'models', 'render.js'), 'utf8'), /imgType:\s*'png'/, '模板截图应使用无损 PNG')
   console.log('模板渲染 OK')

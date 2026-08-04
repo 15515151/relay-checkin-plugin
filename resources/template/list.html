@@ -14,49 +14,49 @@
     --paper: #f6f8f5;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; letter-spacing: 0; }
-  body {
-    width: 640px;
-    zoom: 2;
+  html, body { margin: 0; padding: 0; background: transparent; }
+  #container {
+    width: 800px;
     position: relative;
     overflow: hidden;
-    padding: 31px 34px 23px;
+    padding: 39px 43px 29px;
     color: var(--ink);
     background: var(--paper);
     font-family: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
   }
-  body::before,
-  body::after {
+  #container::before,
+  #container::after {
     content: "";
     position: absolute;
-    width: 72px;
-    height: 72px;
+    width: 90px;
+    height: 90px;
     pointer-events: none;
     border-color: var(--jade);
     border-style: solid;
     opacity: 0.34;
   }
-  body::before { left: 14px; top: 14px; border-width: 2px 0 0 2px; }
-  body::after { right: 14px; bottom: 14px; border-width: 0 2px 2px 0; }
+  #container::before { left: 18px; top: 18px; border-width: 2px 0 0 2px; }
+  #container::after { right: 18px; bottom: 18px; border-width: 0 2px 2px 0; }
   .header {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 72px;
-    gap: 18px;
+    grid-template-columns: minmax(0, 1fr) 90px;
+    gap: 22px;
     align-items: start;
-    padding: 7px 5px 19px;
+    padding: 9px 6px 24px;
     border-bottom: 1px solid var(--ink);
   }
-  .kicker { color: var(--jade); font: 10px Consolas, monospace; }
+  .kicker { color: var(--jade); font: 13px Consolas, monospace; }
   .title {
-    margin-top: 8px;
+    margin-top: 10px;
     font-family: "Noto Serif SC", "Source Han Serif SC", "SimSun", serif;
-    font-size: 29px;
+    font-size: 36px;
     font-weight: 800;
     line-height: 1.18;
   }
-  .subtitle { margin-top: 6px; color: var(--muted); font-size: 11px; }
+  .subtitle { margin-top: 8px; color: var(--muted); font-size: 14px; }
   .seal {
-    width: 62px;
-    height: 62px;
+    width: 78px;
+    height: 78px;
     display: grid;
     place-items: center;
     align-content: center;
@@ -64,73 +64,73 @@
     border: 3px double var(--vermilion);
     transform: rotate(-4deg);
     font-family: "Noto Serif SC", "SimSun", serif;
-    font-size: 15px;
+    font-size: 19px;
     font-weight: 800;
     line-height: 1.15;
   }
-  .seal small { margin-top: 3px; font: 9px Consolas, monospace; }
+  .seal small { margin-top: 4px; font: 11px Consolas, monospace; }
   .owner-strip {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 128px 113px;
-    margin-top: 13px;
-    border-top: 5px solid var(--jade);
+    grid-template-columns: minmax(0, 1fr) 160px 142px;
+    margin-top: 16px;
+    border-top: 6px solid var(--jade);
     border-bottom: 1px solid var(--line);
   }
-  .owner-cell { min-height: 64px; padding: 10px 11px; border-right: 1px solid var(--line); }
+  .owner-cell { min-height: 80px; padding: 13px 14px; border-right: 1px solid var(--line); }
   .owner-cell:last-child { border-right: 0; }
-  .owner-label { color: var(--muted); font-size: 10px; }
-  .owner-name { margin-top: 3px; overflow-wrap: anywhere; font-family: "Noto Serif SC", "SimSun", serif; font-size: 14px; font-weight: 800; }
-  .owner-id { color: var(--muted); font: 10px Consolas, monospace; }
-  .owner-value { display: flex; align-items: baseline; gap: 5px; margin-top: 3px; }
-  .owner-value b { color: var(--jade); font-family: "Noto Serif SC", "SimSun", serif; font-size: 20px; line-height: 1; }
-  .owner-value span { color: var(--muted); font-size: 10px; }
-  .owner-switch { margin-top: 5px; color: var(--jade); font-size: 11px; font-weight: 700; }
-  .owner-switch::before { content: "◆"; margin-right: 5px; font-size: 6px; }
-  .account-list { margin-top: 4px; }
+  .owner-label { color: var(--muted); font-size: 13px; }
+  .owner-name { margin-top: 4px; overflow-wrap: anywhere; font-family: "Noto Serif SC", "SimSun", serif; font-size: 18px; font-weight: 800; }
+  .owner-id { color: var(--muted); font: 13px Consolas, monospace; }
+  .owner-value { display: flex; align-items: baseline; gap: 6px; margin-top: 4px; }
+  .owner-value b { color: var(--jade); font-family: "Noto Serif SC", "SimSun", serif; font-size: 25px; line-height: 1; }
+  .owner-value span { color: var(--muted); font-size: 13px; }
+  .owner-switch { margin-top: 6px; color: var(--jade); font-size: 14px; font-weight: 700; }
+  .owner-switch::before { content: "◆"; margin-right: 6px; font-size: 8px; }
+  .account-list { margin-top: 5px; }
   .account {
     display: grid;
-    grid-template-columns: 43px minmax(0, 1fr);
-    gap: 11px;
-    padding: 16px 3px 14px;
+    grid-template-columns: 54px minmax(0, 1fr);
+    gap: 14px;
+    padding: 20px 4px 18px;
     border-bottom: 1px solid var(--line);
   }
   .account-mark {
     padding-top: 2px;
     color: var(--vermilion);
     font-family: "Noto Serif SC", "SimSun", serif;
-    font-size: 22px;
+    font-size: 28px;
     line-height: 1;
   }
-  .account-mark small { display: block; margin-top: 5px; color: var(--muted); font-family: "Noto Sans SC", sans-serif; font-size: 10px; white-space: nowrap; }
+  .account-mark small { display: block; margin-top: 6px; color: var(--muted); font-family: "Noto Sans SC", sans-serif; font-size: 12px; white-space: nowrap; }
   .account-main { min-width: 0; }
-  .account-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 11px; align-items: baseline; }
-  .account-name { min-width: 0; overflow-wrap: anywhere; font-family: "Noto Serif SC", "SimSun", serif; font-size: 14px; font-weight: 800; line-height: 1.35; }
-  .account-type { color: var(--jade); font: 10px Consolas, monospace; font-weight: 700; white-space: nowrap; }
-  .account-url { margin-top: 5px; color: var(--muted); font: 10px Consolas, monospace; line-height: 1.55; overflow-wrap: anywhere; }
-  .metrics { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 11px; border-top: 1px solid var(--line); }
-  .metric { padding: 8px 9px 0 0; border-right: 1px solid var(--line); }
-  .metric:not(:first-child) { padding-left: 10px; }
+  .account-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: baseline; }
+  .account-name { min-width: 0; overflow-wrap: anywhere; font-family: "Noto Serif SC", "SimSun", serif; font-size: 18px; font-weight: 800; line-height: 1.35; }
+  .account-type { color: var(--jade); font: 13px Consolas, monospace; font-weight: 700; white-space: nowrap; }
+  .account-url { margin-top: 6px; color: var(--muted); font: 13px Consolas, monospace; line-height: 1.55; overflow-wrap: anywhere; }
+  .metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 14px; border-top: 1px solid var(--line); }
+  .metric { min-width: 0; padding: 10px 11px 0 0; border-right: 1px solid var(--line); }
+  .metric:not(:first-child) { padding-left: 13px; }
   .metric:last-child { border-right: 0; }
-  .metric-label { color: var(--muted); font-size: 10px; }
-  .metric-value { margin-top: 3px; font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
-  .metric-value.balance { color: var(--ink); font: 12px Consolas, monospace; font-weight: 700; }
+  .metric-label { color: var(--muted); font-size: 13px; }
+  .metric-value { margin-top: 4px; font-size: 15px; font-weight: 700; overflow-wrap: anywhere; }
+  .metric-value.balance { color: var(--ink); font: 15px Consolas, monospace; font-weight: 700; }
   .metric-value.on { color: var(--jade); }
   .metric-value.warn { color: var(--gold); }
   .metric-value.off { color: var(--muted); }
   .empty {
-    margin: 18px 0 5px;
-    padding: 28px 18px;
+    margin: 23px 0 6px;
+    padding: 35px 23px;
     color: var(--muted);
     border-top: 1px solid var(--line);
     border-bottom: 1px solid var(--line);
     text-align: center;
-    font-size: 12px;
+    font-size: 15px;
   }
-  .empty b { display: block; margin-bottom: 5px; color: var(--vermilion); font-family: "Noto Serif SC", "SimSun", serif; font-size: 18px; }
+  .empty b { display: block; margin-bottom: 6px; color: var(--vermilion); font-family: "Noto Serif SC", "SimSun", serif; font-size: 23px; }
   .action-hint {
     display: grid;
-    grid-template-columns: 52px minmax(0, 1fr);
-    margin-top: 14px;
+    grid-template-columns: 65px minmax(0, 1fr);
+    margin-top: 18px;
     color: #365a4c;
     background: var(--jade-soft);
     border-right: 4px solid var(--jade);
@@ -141,25 +141,26 @@
     color: #fff;
     background: var(--jade);
     font-family: "Noto Serif SC", "SimSun", serif;
-    font-size: 13px;
+    font-size: 16px;
     font-weight: 800;
   }
-  .action-text { padding: 9px 12px; font-size: 11px; line-height: 1.6; }
-  .action-text b { color: var(--ink); font: 11px Consolas, monospace; }
+  .action-text { padding: 11px 15px; font-size: 14px; line-height: 1.6; }
+  .action-text b { color: var(--ink); font: 14px Consolas, monospace; }
   .footer {
     display: flex;
     justify-content: space-between;
     align-items: baseline;
-    margin-top: 19px;
-    padding: 9px 3px 0;
+    margin-top: 24px;
+    padding: 11px 4px 0;
     color: var(--muted);
     border-top: 1px solid var(--line);
-    font: 9px Consolas, monospace;
+    font: 12px Consolas, monospace;
   }
-  .footer b { color: var(--jade); font-family: "Noto Serif SC", "SimSun", serif; font-size: 10px; }
+  .footer b { color: var(--jade); font-family: "Noto Serif SC", "SimSun", serif; font-size: 13px; }
 </style>
 </head>
 <body>
+<main id="container">
   <header class="header">
     <div>
       <div class="kicker">RELAY CHECK-IN · ACCOUNT LEDGER</div>
@@ -214,5 +215,6 @@
   {{/if}}
 
   <footer class="footer"><b>中转站账号簿</b><span>relay-checkin-plugin · TRSS-Yunzai</span></footer>
+</main>
 </body>
 </html>

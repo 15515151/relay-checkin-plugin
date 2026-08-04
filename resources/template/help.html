@@ -15,49 +15,49 @@
     --paper: #f6f8f5;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; letter-spacing: 0; }
-  body {
-    width: 640px;
-    zoom: 2;
+  html, body { margin: 0; padding: 0; background: transparent; }
+  #container {
+    width: 800px;
     position: relative;
     overflow: hidden;
-    padding: 31px 34px 23px;
+    padding: 39px 43px 29px;
     color: var(--ink);
     background: var(--paper);
     font-family: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
   }
-  body::before,
-  body::after {
+  #container::before,
+  #container::after {
     content: "";
     position: absolute;
-    width: 72px;
-    height: 72px;
+    width: 90px;
+    height: 90px;
     pointer-events: none;
     border-color: var(--jade);
     border-style: solid;
     opacity: 0.34;
   }
-  body::before { left: 14px; top: 14px; border-width: 2px 0 0 2px; }
-  body::after { right: 14px; bottom: 14px; border-width: 0 2px 2px 0; }
+  #container::before { left: 18px; top: 18px; border-width: 2px 0 0 2px; }
+  #container::after { right: 18px; bottom: 18px; border-width: 0 2px 2px 0; }
   .header {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 72px;
-    gap: 18px;
+    grid-template-columns: minmax(0, 1fr) 90px;
+    gap: 22px;
     align-items: start;
-    padding: 7px 5px 19px;
+    padding: 9px 6px 24px;
     border-bottom: 1px solid var(--ink);
   }
-  .kicker { color: var(--jade); font: 10px Consolas, monospace; }
+  .kicker { color: var(--jade); font: 13px Consolas, monospace; }
   .title {
-    margin-top: 8px;
+    margin-top: 10px;
     font-family: "Noto Serif SC", "Source Han Serif SC", "SimSun", serif;
-    font-size: 29px;
+    font-size: 36px;
     font-weight: 800;
     line-height: 1.18;
   }
-  .subtitle { margin-top: 6px; color: var(--muted); font-size: 11px; }
+  .subtitle { margin-top: 8px; color: var(--muted); font-size: 14px; }
   .seal {
-    width: 62px;
-    height: 62px;
+    width: 78px;
+    height: 78px;
     display: grid;
     place-items: center;
     align-content: center;
@@ -65,48 +65,48 @@
     border: 3px double var(--vermilion);
     transform: rotate(-4deg);
     font-family: "Noto Serif SC", "SimSun", serif;
-    font-size: 15px;
+    font-size: 19px;
     font-weight: 800;
     line-height: 1.15;
   }
-  .seal small { margin-top: 3px; font: 9px Consolas, monospace; }
-  .section { margin-top: 17px; }
+  .seal small { margin-top: 4px; font: 11px Consolas, monospace; }
+  .section { margin-top: 21px; }
   .section-head {
     display: grid;
-    grid-template-columns: 43px minmax(0, 1fr) auto;
-    gap: 9px;
+    grid-template-columns: 54px minmax(0, 1fr) auto;
+    gap: 11px;
     align-items: center;
-    padding-bottom: 8px;
+    padding-bottom: 10px;
     border-bottom: 1px solid var(--ink);
   }
-  .section-mark { color: var(--vermilion); font-family: "Noto Serif SC", "SimSun", serif; font-size: 23px; line-height: 1; }
-  .section-title { font-family: "Noto Serif SC", "SimSun", serif; font-size: 15px; font-weight: 800; }
-  .section-plain { color: var(--muted); font-size: 10px; }
+  .section-mark { color: var(--vermilion); font-family: "Noto Serif SC", "SimSun", serif; font-size: 29px; line-height: 1; }
+  .section-title { font-family: "Noto Serif SC", "SimSun", serif; font-size: 19px; font-weight: 800; }
+  .section-plain { color: var(--muted); font-size: 13px; }
   .command-list { border-bottom: 1px solid var(--line); }
   .command-row {
     display: grid;
-    grid-template-columns: 285px minmax(0, 1fr);
-    gap: 13px;
-    min-height: 39px;
+    grid-template-columns: 356px minmax(0, 1fr);
+    gap: 16px;
+    min-height: 49px;
     align-items: center;
     border-bottom: 1px solid #dbe0dc;
   }
   .command-row:last-child { border-bottom: 0; }
   .command {
     position: relative;
-    padding: 5px 0 5px 13px;
+    padding: 6px 0 6px 16px;
     color: var(--jade);
-    font: 11px Consolas, "Noto Sans SC", monospace;
+    font: 14px Consolas, "Noto Sans SC", monospace;
     font-weight: 700;
     line-height: 1.4;
     overflow-wrap: anywhere;
   }
-  .command::before { content: "◆"; position: absolute; left: 0; top: 8px; font-size: 6px; }
-  .desc { padding: 7px 0; color: #59675f; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+  .command::before { content: "◆"; position: absolute; left: 0; top: 10px; font-size: 8px; }
+  .desc { padding: 9px 0; color: #59675f; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
   .notice {
     display: grid;
-    grid-template-columns: 54px minmax(0, 1fr);
-    margin-top: 16px;
+    grid-template-columns: 68px minmax(0, 1fr);
+    margin-top: 20px;
     background: var(--vermilion-soft);
     border-right: 4px solid var(--vermilion);
   }
@@ -117,31 +117,32 @@
     color: #fff;
     background: var(--vermilion);
     font-family: "Noto Serif SC", "SimSun", serif;
-    font-size: 14px;
+    font-size: 18px;
     font-weight: 800;
     line-height: 1.2;
   }
-  .notice-mark small { margin-top: 3px; font: 9px Consolas, monospace; }
-  .notice-text { padding: 11px 13px; color: #74362f; font-size: 11px; line-height: 1.65; }
+  .notice-mark small { margin-top: 4px; font: 11px Consolas, monospace; }
+  .notice-text { padding: 14px 16px; color: #74362f; font-size: 14px; line-height: 1.65; }
   .notes { border-top: 1px solid var(--line); }
-  .note-row { display: grid; grid-template-columns: 31px minmax(0, 1fr); gap: 7px; padding: 7px 2px; border-bottom: 1px solid #dbe0dc; }
-  .note-no { color: var(--gold); font: 10px Consolas, monospace; font-weight: 700; }
-  .note-text { color: #59675f; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
+  .note-row { display: grid; grid-template-columns: 39px minmax(0, 1fr); gap: 9px; padding: 9px 3px; border-bottom: 1px solid #dbe0dc; }
+  .note-no { color: var(--gold); font: 13px Consolas, monospace; font-weight: 700; }
+  .note-text { color: #59675f; font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
   .note-text b { color: var(--ink); }
   .footer {
     display: flex;
     justify-content: space-between;
     align-items: baseline;
-    margin-top: 19px;
-    padding: 9px 3px 0;
+    margin-top: 24px;
+    padding: 11px 4px 0;
     color: var(--muted);
     border-top: 1px solid var(--line);
-    font: 9px Consolas, monospace;
+    font: 12px Consolas, monospace;
   }
-  .footer b { color: var(--jade); font-family: "Noto Serif SC", "SimSun", serif; font-size: 10px; }
+  .footer b { color: var(--jade); font-family: "Noto Serif SC", "SimSun", serif; font-size: 13px; }
 </style>
 </head>
 <body>
+<main id="container">
   <header class="header">
     <div>
       <div class="kicker">RELAY CHECK-IN · COMMAND MANUAL</div>
@@ -196,5 +197,6 @@
   </section>
 
   <footer class="footer"><b>中转站签到手册</b><span>relay-checkin-plugin · TRSS-Yunzai</span></footer>
+</main>
 </body>
 </html>
