@@ -9,14 +9,14 @@ schedule:
   # 触发后随机延迟 0~N 分钟再开始执行（避免整点并发特征），0 为不延迟
   jitterMinutes: 10
   # 相邻两个账号签到之间的随机间隔（秒），[最小, 最大]
-  accountDelay: [1, 5]
+  accountDelay: [5, 15]
   # 同时处理的用户数（单用户内部仍逐账号串行）；人多时调大，服务器弱则调小，上限 10
   concurrency: 3
 
 # 定时签到结果推送
 push:
-  # group   = 推送回账号所属群，白名单制：仅推送到群管理发过 #中转开启群推送 的群，
-  #           且群内仍有已绑定用户（合并转发形式，私聊添加的账号仍私聊推送）
+  # group   = 将全部用户的签到结果推送到 data/push_groups.json 中的每个群（合并转发形式）
+  #           群管理可在目标群发送 #中转开启群推送，将本群加入固定推送目标
   # private = 只私聊本人
   # off     = 不推送（仅记录日志）
   mode: group
@@ -28,8 +28,16 @@ request:
   # 单次请求超时（秒）
   timeout: 15
   # 网络错误重试次数
-  retry: 3
+  # 仅 GET/HEAD 等只读请求会重试；签到 POST 固定只发送一次
+  retry: 2
   userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
+# 站点地址安全策略
+security:
+  # 默认只允许 HTTPS；确需使用 HTTP 站点时由机器人主人显式开启
+  allowHttp: false
+  # 默认禁止本机/内网/链路本地地址；确需访问私有站点时填写精确域名或 *.example.com
+  allowedPrivateHosts: []
 
 # 无头浏览器方案（AnyRouter 过阿里云 WAF、Turnstile 站点自动降级签到）
 browser:

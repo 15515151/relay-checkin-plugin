@@ -1,4 +1,5 @@
 import { getConfig } from '../config.js'
+import { assertSafeRequestUrl } from '../url-security.js'
 
 /**
  * 按代理配置判断某 host 是否走代理，返回代理地址或 null（纯函数便于测试）
@@ -49,7 +50,7 @@ async function getProxyAgent(proxyUrl) {
  * 经 http 代理请求 https 站点（node:https + proxy agent；不跟随重定向，与 fetch 路径语义一致）
  * 用独立定时器兜底超时：options.timeout 依赖 socket 分配，代理 CONNECT 阶段挂起时不会触发
  */
-async function proxiedRequest(url, { method, headers, timeoutMs, proxyUrl }) {
+async function proxiedRequest(url, { method, headers, body, timeoutMs, proxyUrl }) {
   const agent = await getProxyAgent(proxyUrl)
   const { request: httpsRequest } = await import('node:https')
   return await new Promise((resolve, reject) => {
@@ -58,13 +59,22 @@ async function proxiedRequest(url, { method, headers, timeoutMs, proxyUrl }) {
       res.on('data', c => chunks.push(c))
       res.on('end', () => {
         clearTimeout(timer)
+        const text = Buffer.concat(chunks).toString('utf8')
         let json = null
         try {
-          json = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+          json = JSON.parse(text)
         } catch {
           // 非 JSON 响应
         }
-        resolve({ status: res.statusCode, json })
+        resolve({
+          status: res.statusCode,
+          json,
+          contentType: String(res.headers['content-type'] || ''),
+          textSnippet: json ? '' : text.slice(0, 512),
+          setCookies: Array.isArray(res.headers['set-cookie'])
+            ? res.headers['set-cookie']
+            : (res.headers['set-cookie'] ? [String(res.headers['set-cookie'])] : [])
+        })
       })
     })
     const timer = setTimeout(() => req.destroy(new Error('代理请求超时（代理隧道无响应）')), timeoutMs)
@@ -72,31 +82,51 @@ async function proxiedRequest(url, { method, headers, timeoutMs, proxyUrl }) {
       clearTimeout(timer)
       reject(err)
     })
+    if (body != null) req.write(body)
     req.end()
   })
 }
 
 /**
  * 发起 JSON 请求（带超时与重试；命中代理配置的 https 站点走代理）
- * @param {object} opts { method, headers, timeoutMs: 覆盖配置超时, maxRetry: 覆盖配置重试次数 }
- * @returns {Promise<{status: number, json: object|null}>}
+ * @param {object} opts { method, headers, body: JSON 对象或字符串,
+ *                        timeoutMs: 覆盖配置超时, maxRetry: 覆盖配置重试次数 }
+ * @returns {Promise<{status: number, json: object|null, setCookies: string[]}>}
  */
-export async function request(url, { method = 'GET', headers = {}, timeoutMs = null, maxRetry = null } = {}) {
+export async function request(url, { method = 'GET', headers = {}, body = null, timeoutMs = null, maxRetry = null } = {}) {
   const cfg = getConfig()
   const tMs = timeoutMs ?? (cfg.request.timeout || 15) * 1000
-  const retries = maxRetry ?? (cfg.request.retry ?? 1)
+  const normalizedMethod = String(method || 'GET').toUpperCase()
+  const idempotent = ['GET', 'HEAD', 'OPTIONS'].includes(normalizedMethod)
+  // 签到 POST 不能自动重试：第一次可能已在服务端成功，只是响应在途中丢失。
+  const retries = idempotent ? (maxRetry ?? (cfg.request.retry ?? 2)) : 0
+  let requestBody = body
   const fullHeaders = {
     'User-Agent': cfg.request.userAgent,
     Accept: 'application/json',
     ...headers
   }
-  const proxyUrl = url.startsWith('https:') ? proxyForHost(new URL(url).hostname) : null
+  if (body != null && typeof body !== 'string' && !Buffer.isBuffer(body)) {
+    requestBody = JSON.stringify(body)
+    if (!Object.keys(fullHeaders).some(key => key.toLowerCase() === 'content-type')) {
+      fullHeaders['Content-Type'] = 'application/json'
+    }
+  }
+  const safeUrl = await assertSafeRequestUrl(url)
+  const targetUrl = safeUrl.href
+  const proxyUrl = safeUrl.protocol === 'https:' ? proxyForHost(safeUrl.hostname) : null
 
   let lastErr = null
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (proxyUrl) {
       try {
-        return await proxiedRequest(url, { method, headers: fullHeaders, timeoutMs: tMs, proxyUrl })
+        return await proxiedRequest(targetUrl, {
+          method: normalizedMethod,
+          headers: fullHeaders,
+          body: requestBody,
+          timeoutMs: tMs,
+          proxyUrl
+        })
       } catch (err) {
         lastErr = err
         continue
@@ -105,26 +135,45 @@ export async function request(url, { method = 'GET', headers = {}, timeoutMs = n
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), tMs)
     try {
-      const res = await fetch(url, {
-        method,
+      const res = await fetch(targetUrl, {
+        method: normalizedMethod,
         headers: fullHeaders,
+        body: requestBody,
         redirect: 'manual',
         signal: controller.signal
       })
       let json = null
-      try {
-        json = await res.json()
-      } catch {
-        // 非 JSON 响应（404 页面 / WAF 拦截页等）
+      let text = ''
+      if (typeof res.text === 'function') {
+        text = await res.text()
+        try { json = JSON.parse(text) } catch { /* 非 JSON 响应 */ }
+      } else {
+        try { json = await res.json() } catch { /* 测试桩或非 JSON 响应 */ }
       }
-      return { status: res.status, json }
+      return {
+        status: res.status,
+        json,
+        contentType: String(res.headers?.get?.('content-type') || ''),
+        textSnippet: json ? '' : text.slice(0, 512),
+        setCookies: responseSetCookies(res.headers)
+      }
     } catch (err) {
       lastErr = err
     } finally {
       clearTimeout(timer)
     }
   }
-  throw new Error(`网络请求失败: ${lastErr?.message || lastErr}`)
+  throw new Error(`${normalizedMethod} 请求失败: ${lastErr?.message || lastErr}`)
+}
+
+function responseSetCookies(headers) {
+  if (!headers) return []
+  if (typeof headers.getSetCookie === 'function') {
+    const values = headers.getSetCookie()
+    if (Array.isArray(values)) return values.map(String)
+  }
+  const combined = headers.get?.('set-cookie')
+  return combined ? [String(combined)] : []
 }
 
 /**
@@ -152,6 +201,7 @@ export function parseUserInfo(json) {
     siteUserId: d.id,
     quota: d.quota,
     usedQuota: d.used_quota,
+    checkedIn: typeof d.checked_in === 'boolean' ? d.checked_in : null,
     balanceText: quotaToUsd(d.quota) ?? '-',
     usedText: quotaToUsd(d.used_quota) ?? '-'
   }
@@ -160,30 +210,45 @@ export function parseUserInfo(json) {
 /**
  * 解析签到响应为统一结构
  */
-export function parseCheckinResult(status, json) {
+export function parseCheckinResult(status, json, meta = {}) {
   if (status === 404) {
     return { ok: false, already: false, msg: '站点无此签到接口（可能未启用签到功能）' }
-  }
-  if (status === 401 || status === 403) {
-    return { ok: false, already: false, msg: `凭据无效或已过期 (HTTP ${status})` }
   }
   if (status === 301 || status === 302) {
     return { ok: false, already: false, msg: '被重定向到登录页，凭据可能已失效' }
   }
+  const msg = json?.message || json?.msg || json?.error?.message || ''
+  const challengeText = `${msg} ${meta.textSnippet || ''}`
+  if (/turnstile|captcha|人机|验证码|访问验证|checking your browser|aliyun_waf|acw_sc/i.test(challengeText)) {
+    return { ok: false, already: false, msg: /turnstile/i.test(challengeText)
+      ? '站点开启了 Turnstile 人机验证，无法直接签到'
+      : '请求被站点 WAF/人机验证拦截' }
+  }
+  if (status === 401 || status === 403) {
+    return { ok: false, already: false, msg: `凭据无效或已过期 (HTTP ${status})` }
+  }
   if (!json) {
     return { ok: false, already: false, msg: `响应异常 (HTTP ${status})` }
   }
-  const msg = json.message || ''
-  if (json.success) {
+  const success = json.success === true ||
+    (json.success == null && (json.ret === 1 || json.code === 0 || json.code === '0'))
+  if (success) {
     // new-api 为 quota_awarded；Veloera 为 quota（均为本次奖励额度）
-    const award = json.data?.quota_awarded ?? json.data?.quota ?? null
+    const award = json.data?.quota_awarded ?? json.data?.quota ?? json.quota_awarded ?? json.quota ?? null
     return { ok: true, already: false, msg: msg || '签到成功', awardQuota: award }
   }
   if (/已签|签过|重复签|already/i.test(msg)) {
     return { ok: true, already: true, msg: '今日已签到' }
   }
-  if (/turnstile/i.test(msg)) {
-    return { ok: false, already: false, msg: '站点开启了 Turnstile 人机验证，无法自动签到' }
-  }
   return { ok: false, already: false, msg: msg || '签到失败' }
+}
+
+/**
+ * 用签到前后的「余额 + 累计消耗」推导新增额度，避免把同时发生的消费算成负奖励。
+ */
+export function deriveAwardQuota(before, after) {
+  const values = [before?.quota, before?.usedQuota, after?.quota, after?.usedQuota].map(Number)
+  if (values.some(value => !Number.isFinite(value))) return null
+  const delta = (values[2] + values[3]) - (values[0] + values[1])
+  return delta > 0 ? delta : null
 }

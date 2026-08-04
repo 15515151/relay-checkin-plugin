@@ -41,6 +41,9 @@ try {
   assert.deepEqual(cfg.proxy.hosts, ['anyrouter'])
   assert.equal(cfg.proxy.useForBrowser, true)
   assert.equal(cfg.schedule.concurrency, 3)
+  assert.equal(cfg.request.retry, 2)
+  assert.equal(cfg.security.allowHttp, false)
+  assert.deepEqual(cfg.security.allowedPrivateHosts, [])
   assert.equal(cfg.browser.maxConcurrentPages, 2)
   // 手动指令的整体超时预算 = slotWaitSec + 120s，必须严格大于排队上限，
   // 否则会出现「已告知失败但任务稍后真的执行了」的矛盾结果
@@ -53,7 +56,7 @@ try {
   console.log('config OK')
 
   // ---- adapters/common ----
-  const { quotaToUsd, parseUserInfo, parseCheckinResult, matchProxy } = await import('../models/adapters/common.js')
+  const { quotaToUsd, parseUserInfo, parseCheckinResult, deriveAwardQuota, matchProxy } = await import('../models/adapters/common.js')
   // 代理域名匹配：hosts 关键字包含匹配；空数组 = 全部走代理；未配置 url = 不走
   const P = 'http://127.0.0.1:7890'
   assert.equal(matchProxy('anyrouter.top', { url: P, hosts: ['anyrouter'] }), P)
@@ -91,12 +94,28 @@ try {
   assert.match(r.msg, /重定向/)
   r = parseCheckinResult(401, { success: false })
   assert.match(r.msg, /凭据/)
+  r = parseCheckinResult(200, { ret: 1, msg: 'ok', data: { quota: 123 } })
+  assert.deepEqual([r.ok, r.awardQuota], [true, 123])
+  r = parseCheckinResult(200, { code: 0, msg: 'ok' })
+  assert.equal(r.ok, true)
+  r = parseCheckinResult(403, null, { textSnippet: '<title>Access Verification</title> aliyun_waf' })
+  assert.match(r.msg, /WAF/)
+  assert.equal(deriveAwardQuota(
+    { quota: 1000000, usedQuota: 100000 },
+    { quota: 1200000, usedQuota: 400000 }
+  ), 500000, '奖励推导应抵消签到期间的正常消费')
   console.log('adapters/common OK')
 
   // ---- adapters/index ----
   const { normalizeBaseUrl, cookieTypeForHost, getAdapter } = await import('../models/adapters/index.js')
   assert.equal(normalizeBaseUrl('xx.com/'), 'https://xx.com')
-  assert.equal(normalizeBaseUrl('http://a.b//'), 'http://a.b')
+  assert.throws(() => normalizeBaseUrl('http://a.b'), /HTTPS/)
+  assert.throws(() => normalizeBaseUrl('https://127.0.0.1'), /不允许/)
+  assert.throws(() => normalizeBaseUrl('https://example.com/path'), /根地址/)
+  const { isPrivateAddress } = await import('../models/url-security.js')
+  assert.equal(isPrivateAddress('10.0.0.1'), true)
+  assert.equal(isPrivateAddress('169.254.169.254'), true)
+  assert.equal(isPrivateAddress('8.8.8.8'), false)
   assert.equal(cookieTypeForHost('agentrouter.org'), 'agentrouter')
   assert.equal(cookieTypeForHost('xx.agentrouter.cn'), 'agentrouter')
   assert.equal(cookieTypeForHost('ps.air-outer.com'), 'agentrouter', 'air-outer.com 系域名应识别为 AgentRouter')
@@ -120,10 +139,23 @@ try {
   const generic = (await import('../models/adapters/generic.js')).default
   h = generic.buildHeaders({ token: 'S', siteUserId: 5 })
   assert.equal(h.Cookie, 'session=S')
-  const agentrouter = (await import('../models/adapters/agentrouter.js')).default
+  const agentrouterModule = await import('../models/adapters/agentrouter.js')
+  const agentrouter = agentrouterModule.default
   h = agentrouter.buildHeaders({ token: 'S', siteUserId: 7 })
   assert.equal(h.Cookie, 'session=S')
   assert.equal(h['New-Api-User'], '7')
+  assert.equal(agentrouterModule.sessionCookieFrom([
+    'acw_tc=x; Path=/',
+    'session=abc.def==; Path=/; HttpOnly'
+  ]), 'abc.def==')
+  assert.equal(agentrouterModule.parseLoginAwardQuota({
+    data: {
+      quota_per_unit: 500000,
+      announcements: [{ content: '支持登录签到；签到送 $25 Credit' }]
+    }
+  }), 12500000)
+  assert.equal(agentrouterModule.hasEmailLogin({ authMode: 'email', loginEmail: 'u@example.com', password: 'p' }), true)
+  assert.equal(agentrouterModule.hasEmailLogin({ token: 'session-only' }), false)
   const anyrouter = (await import('../models/adapters/anyrouter.js')).default
   h = anyrouter.buildHeaders({ token: 'S', siteUserId: 8 })
   assert.equal(h.Cookie, 'session=S')
@@ -160,13 +192,25 @@ try {
   assert.deepEqual([up.index, up.updated], [2, false])
   assert.equal(store.getEntry(eGroup).accounts.length, 2)
 
+  // AgentRouter 官方域名与备用域名是同一站，同一用户ID应更新而不是重复添加。
+  const official = store.upsertAccount(eGroup, acc({
+    name: 'agentrouter.org', baseUrl: 'https://agentrouter.org', siteUserId: 99, token: 'official-1'
+  }))
+  assert.equal(official.updated, false)
+  const alias = store.upsertAccount(eGroup, acc({
+    name: 'ps.air-outer.com', baseUrl: 'https://ps.air-outer.com', siteUserId: 99, token: 'official-2'
+  }))
+  assert.equal(alias.updated, true)
+  assert.equal(alias.index, official.index)
+  assert.equal(alias.account.baseUrl, 'https://ps.air-outer.com')
+
   // 同站点同站点用户ID → 更新凭据，且保留单账号定时开关偏好
   store.setAccountAuto(eGroup, 1, false)
   up = store.upsertAccount(eGroup, acc({ token: 't1-new' }))
   assert.deepEqual([up.index, up.updated], [1, true])
   assert.equal(up.account, store.getEntry(eGroup).accounts[0], '应返回入库后的对象引用（供添加后签到直接落缓存）')
   let entryNow = store.getEntry(eGroup)
-  assert.equal(entryNow.accounts.length, 2)
+  assert.equal(entryNow.accounts.length, 3)
   assert.equal(entryNow.accounts[0].token, 't1-new')
   assert.equal(entryNow.accounts[0].auto, false, '更新凭据不应重置单账号定时开关')
 
@@ -174,7 +218,7 @@ try {
   up = store.upsertAccount(eGroup, acc({ name: 'b.com', baseUrl: 'https://b.com', siteUserId: null, token: 'bt' }))
   assert.equal(up.updated, false)
   up = store.upsertAccount(eGroup, acc({ name: 'b.com', baseUrl: 'https://b.com', siteUserId: null, token: 'bt' }))
-  assert.deepEqual([up.index, up.updated], [3, true])
+  assert.deepEqual([up.index, up.updated], [4, true])
 
   // accountLabel / setAccountAuto 边界
   assert.equal(store.accountLabel({ name: 'x.com', username: 'U' }), 'x.com (U)')
@@ -183,7 +227,7 @@ try {
 
   // 私聊可见同一批账号；且私聊不清空 groupId
   const en2 = store.touchEntry(ePrivate)
-  assert.equal(en2.accounts.length, 3, '私聊应共享群里添加的账号')
+  assert.equal(en2.accounts.length, 4, '私聊应共享群里添加的账号')
   assert.equal(en2.groupId, '999', '私聊使用不应清空最近群')
 
   // 换群后 groupId 跟随最近使用的群，且两个群都留在候选列表里（最近优先）
@@ -204,8 +248,8 @@ try {
 
   // 删除（仅操作本用户数据）
   assert.equal(store.removeAccount(eGroup, 9), null)
-  assert.equal(store.removeAccount(eGroup, 3).name, 'b.com')
-  assert.equal(store.getEntry(eGroup).accounts.length, 2)
+  assert.equal(store.removeAccount(eGroup, 4).name, 'b.com')
+  assert.equal(store.getEntry(eGroup).accounts.length, 3)
 
   // 定时总开关 + allEntries
   store.setAuto(eGroup, false)
@@ -264,15 +308,41 @@ try {
   console.log('lock OK')
 
   // 定时推送白名单
+  assert.deepEqual(store.getPushGroups(), [])
   assert.equal(store.isPushGroup('999'), false)
   assert.equal(store.setPushGroup('999', true), true)
   assert.equal(store.setPushGroup('999', true), false, '重复开启应返回未变化')
+  assert.deepEqual(store.getPushGroups(), ['999'])
   assert.equal(store.isPushGroup(999), true, '数字/字符串群号应等价')
   assert.equal(store.setPushGroup('999', false), true)
   assert.equal(store.isPushGroup('999'), false)
   store.setPushGroup('888', true)
   assert.ok(fs.existsSync(path.join(DATA, 'push_groups.json')), '白名单应落盘')
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(DATA, 'push_groups.json'), 'utf-8')), ['888'])
+  // 手工编辑名单应热生效；群号统一转成字符串并去重、去空值
+  fs.writeFileSync(path.join(DATA, 'push_groups.json'), JSON.stringify(['777', 777, '', null]))
+  assert.deepEqual(store.getPushGroups(), ['777'])
+  assert.equal(store.isPushGroup('777'), true)
+  assert.equal(store.isPushGroup('888'), false)
+
+  // 固定群推送计划：每个目标群都包含同一机器人名下的全部用户
+  const { buildGroupPushPlan } = await import('../models/push-plan.js')
+  const pushItems = [
+    { entry: { selfId: 'bot-1', userId: '111' }, results: [] },
+    { entry: { selfId: 'bot-1', userId: '222' }, results: [] },
+    { entry: { selfId: 'bot-2', userId: '333' }, results: [] }
+  ]
+  const pushPlan = buildGroupPushPlan(pushItems, ['100', '200'])
+  assert.equal(pushPlan.length, 4)
+  assert.deepEqual(
+    pushPlan.map(plan => [plan.selfId, plan.groupId, plan.items.map(item => item.entry.userId)]),
+    [
+      ['bot-1', '100', ['111', '222']],
+      ['bot-1', '200', ['111', '222']],
+      ['bot-2', '100', ['333']],
+      ['bot-2', '200', ['333']]
+    ]
+  )
 
   // 持久化落盘验证
   const onDisk = JSON.parse(fs.readFileSync(path.join(DATA, 'accounts.json'), 'utf-8'))
@@ -291,6 +361,7 @@ try {
   // ---- 指令正则（与 apps/checkin.js 保持一致）----
   const rules = {
     help: /^#中转(站)?(帮助|help)$/,
+    addEmail: /^#中转添加邮箱\s+\S+(?:\s+\S+)*$/,
     addCookie: /^#中转添加[cC]ookie\s+\S+(?:\s+\S+)*$/,
     add: /^#中转添加\s+\S+(?:\s+\S+)*$/,
     list: /^#中转列表$/,
@@ -303,6 +374,8 @@ try {
     bind: /^[\s\S]+$/
   }
   assert.ok(rules.help.test('#中转帮助') && rules.help.test('#中转站help'))
+  assert.ok(rules.addEmail.test('#中转添加邮箱 agentrouter.org'))
+  assert.ok(rules.addEmail.test('#中转添加邮箱 agentrouter.org user@example.com password'))
   assert.ok(rules.add.test('#中转添加 https://x.com abc'))
   assert.ok(rules.add.test('#中转添加 x.com abc 123'))
   assert.ok(rules.add.test('#中转添加 x.com'), '仅地址应命中（发起私聊绑定流程）')

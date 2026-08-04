@@ -1,5 +1,5 @@
 import { getAdapter } from './adapters/index.js'
-import { quotaToUsd, request, parseCheckinResult } from './adapters/common.js'
+import { quotaToUsd, request, parseCheckinResult, deriveAwardQuota } from './adapters/common.js'
 import { turnstileCheckin } from './browser.js'
 import { getConfig } from './config.js'
 import { accountLabel, persist } from './store.js'
@@ -20,7 +20,7 @@ function safePersist() {
 
 export const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min
 
-const STATUS_TEXT = { ok: '签到成功', already: '今日已签', fail: '签到失败' }
+const STATUS_TEXT = { ok: '签到成功', already: '今日已签', unknown: '签到未确认', fail: '签到失败' }
 
 /**
  * 站点回复是否属于「需要人机验证」类拦截（应降级到浏览器方案重试）：
@@ -53,11 +53,30 @@ async function turnstileFallback(account, adapter) {
   if (res.turnstileFailed) {
     return { ok: false, already: false, msg: 'Turnstile 挑战未通过（站点可能要求交互验证）' }
   }
-  const parsed = parseCheckinResult(res.status, res.json)
+  const parsed = parseCheckinResult(res.status, res.json, res)
   if (!parsed.ok && needsBrowser(parsed.msg)) {
     parsed.msg = `${parsed.msg}（浏览器方案已重试，站点可能要求交互式验证）`
   }
   return parsed
+}
+
+async function readCheckinStatus(adapter, account) {
+  if (typeof adapter.getCheckinStatus !== 'function') return null
+  try {
+    return await adapter.getCheckinStatus(account)
+  } catch (err) {
+    logger.warn(`[relay-checkin-plugin] ${account.name} 签到状态查询失败: ${err?.message || err}`)
+    return { supported: true, ok: false, msg: err?.message || String(err) }
+  }
+}
+
+async function readUserInfo(adapter, account) {
+  try {
+    const info = await adapter.userInfo(account)
+    return info?.ok ? info : null
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -66,57 +85,130 @@ async function turnstileFallback(account, adapter) {
  */
 export async function checkinAccount(account) {
   const adapter = getAdapter(account.type)
-  const result = { name: accountLabel(account), status: 'fail', statusText: '', award: '', balance: '-', msg: '' }
-  let statusTextOverride = null
-  let skipInfoQuery = false
+  let r = null
+  let beforeStatus = null
+  let beforeInfo = null
+  let afterInfo = null
 
   try {
-    let r
-    if (adapter.checkinWithInfo) {
-      // AnyRouter 系：一次浏览器会话同时拿签到结果与用户信息
-      const session = await adapter.checkinWithInfo(account)
-      r = session.checkin
-      if (session.info?.ok) {
-        r = { ...r, balanceText: session.info.balanceText }
+    beforeStatus = await readCheckinStatus(adapter, account)
+    if (beforeStatus?.ok && beforeStatus.checked) {
+      // 明确查到本轮执行前已经签到：跳过非幂等 POST。
+      r = {
+        ok: true,
+        already: true,
+        confirmed: true,
+        awardQuota: beforeStatus.awardQuota ?? null,
+        statusTextOverride: '本轮前已签到',
+        msg: ''
       }
-      skipInfoQuery = true
     } else {
-      r = await adapter.checkin(account)
-      // 站点要求人机验证且浏览器方案可用时，自动降级为浏览器签到
-      if (!r.ok && needsBrowser(r.msg) && adapter.checkinPath && getConfig().browser.enable) {
-        logger.info(`[relay-checkin-plugin] ${account.name} 需人机验证，尝试浏览器方案`)
-        r = await turnstileFallback(account, adapter)
+      const compareBalance = typeof adapter.compareBalance === 'function'
+        ? adapter.compareBalance(account)
+        : adapter.compareBalance
+      if (compareBalance || (beforeStatus?.ok && beforeStatus.checked === false)) {
+        beforeInfo = await readUserInfo(adapter, account)
       }
-    }
 
-    if (r.ok) {
-      result.status = r.already ? 'already' : 'ok'
-      statusTextOverride = r.statusTextOverride || null
-      if (r.balanceText) result.balance = r.balanceText
-      if (!r.already && r.awardQuota != null) {
-        result.award = '+' + (quotaToUsd(r.awardQuota) ?? r.awardQuota)
+      if (adapter.checkinWithInfo) {
+        // AnyRouter 系在同一套 WAF cookie 下完成前后余额查询与签到。
+        const session = await adapter.checkinWithInfo(account)
+        r = session.checkin
+        if (session.info?.ok) afterInfo = session.info
+      } else {
+        try {
+          r = await adapter.checkin(account)
+          if (r.info?.ok) afterInfo = r.info
+        } catch (err) {
+          r = { ok: false, already: false, uncertain: true, msg: err?.message || String(err) }
+        }
+        // 站点要求人机验证且浏览器方案可用时，自动降级为浏览器签到
+        if (!r.ok && needsBrowser(r.msg) && adapter.checkinPath && getConfig().browser.enable) {
+          logger.info(`[relay-checkin-plugin] ${account.name} 需人机验证，尝试浏览器方案`)
+          r = await turnstileFallback(account, adapter)
+        }
       }
-    } else {
-      result.msg = r.msg
+
+      const afterStatus = beforeStatus?.supported === false
+        ? null
+        : await readCheckinStatus(adapter, account)
+      if (afterStatus?.ok && afterStatus.checked) {
+        const changedThisRun = beforeStatus?.ok && beforeStatus.checked === false
+        if (!r.ok || r.already) {
+          r = {
+            ok: true,
+            already: !changedThisRun,
+            confirmed: true,
+            awardQuota: r.awardQuota ?? afterStatus.awardQuota ?? null,
+            statusTextOverride: changedThisRun ? '状态复核成功' : '状态复核已签',
+            msg: ''
+          }
+        } else {
+          r.confirmed = true
+          if (r.awardQuota == null) r.awardQuota = afterStatus.awardQuota ?? null
+        }
+      } else if (r.uncertain && afterStatus?.ok && !afterStatus.checked) {
+        r.msg = `${r.msg}；状态复核仍为未签到`
+      }
     }
   } catch (err) {
-    result.msg = err.message
+    r = { ok: false, already: false, msg: err?.message || String(err) }
   }
-  result.statusText = statusTextOverride || STATUS_TEXT[result.status]
 
-  // 余额查询失败不影响签到结果（适配器已携带余额或已在会话中查询时跳过）
-  if (result.balance === '-' && !skipInfoQuery) {
-    try {
-      const info = await adapter.userInfo(account)
-      if (info.ok) result.balance = info.balanceText
-    } catch {
-      // 忽略
+  // 查询签到后余额；失败不影响已经确认的签到结果。
+  if (!afterInfo) afterInfo = await readUserInfo(adapter, account)
+  if (!r?.ok && r?.uncertain && adapter.reconcileByBalance) {
+    const awardQuota = deriveAwardQuota(beforeInfo, afterInfo)
+    if (awardQuota != null) {
+      r = {
+        ok: true,
+        already: false,
+        confirmed: true,
+        awardQuota,
+        statusTextOverride: '余额复核成功',
+        msg: ''
+      }
     }
+  }
+  return finalizeCheckinResult(account, r, { beforeInfo, afterInfo })
+}
+
+/**
+ * 把适配器结果整理成统一展示行，并更新账号运行状态。
+ * 邮箱绑定时首次登录本身已经完成签到，可复用该结果避免重复登录。
+ */
+export function finalizeCheckinResult(account, r, { beforeInfo = null, afterInfo = null } = {}) {
+  const result = { name: accountLabel(account), status: 'fail', statusText: '', award: '', balance: '-', msg: '' }
+  if (afterInfo?.balanceText) result.balance = afterInfo.balanceText
+  else if (r?.balanceText) result.balance = r.balanceText
+
+  if (r?.ok && !r.already && r.awardQuota == null) {
+    r.awardQuota = deriveAwardQuota(beforeInfo, afterInfo)
+  }
+
+  if (r?.ok) {
+    result.status = r.confirmed === false ? 'unknown' : (r.already ? 'already' : 'ok')
+    result.statusText = r.statusTextOverride || STATUS_TEXT[result.status]
+    result.msg = r.msg || ''
+    if (r.awardQuota != null) {
+      const value = quotaToUsd(r.awardQuota) ?? r.awardQuota
+      result.award = r.already ? `今日 +${value}` : `+${value}`
+    }
+  } else {
+    result.status = 'fail'
+    result.statusText = STATUS_TEXT.fail
+    result.msg = r?.msg || '签到失败'
   }
 
   // 缓存运行时状态供 #中转列表 展示（由调用方批量落盘）
+  const now = new Date().toISOString()
   if (result.status === 'ok' || result.status === 'already') {
-    account.lastCheckinAt = new Date().toISOString()
+    account.lastCheckinAt = now
+    account.lastCheckinAttemptAt = now
+    account.lastCheckinConfirmed = true
+  } else if (result.status === 'unknown') {
+    account.lastCheckinAttemptAt = now
+    account.lastCheckinConfirmed = false
   }
   if (result.balance !== '-') account.lastBalance = result.balance
 

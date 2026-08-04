@@ -3,6 +3,7 @@ import veloera from './veloera.js'
 import generic from './generic.js'
 import agentrouter from './agentrouter.js'
 import anyrouter from './anyrouter.js'
+import { normalizeAndValidateBaseUrl } from '../url-security.js'
 
 const adapters = { newapi, veloera, generic, agentrouter, anyrouter }
 
@@ -24,9 +25,7 @@ export function cookieTypeForHost(host) {
  * 规范化站点地址：去尾部斜杠、补 https://
  */
 export function normalizeBaseUrl(input) {
-  let url = String(input).trim().replace(/\/+$/, '')
-  if (!/^https?:\/\//i.test(url)) url = 'https://' + url
-  return url
+  return normalizeAndValidateBaseUrl(input)
 }
 
 /**

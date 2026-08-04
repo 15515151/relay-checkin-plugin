@@ -1,5 +1,6 @@
 import { getConfig } from './config.js'
 import { proxyForHost } from './adapters/common.js'
+import { assertSafeRequestUrl } from './url-security.js'
 
 /**
  * 无头浏览器工具：用于过阿里云 WAF（AnyRouter 系）与 Cloudflare Turnstile 挑战。
@@ -270,6 +271,30 @@ function noteResult(host, ok) {
   breaker.set(host, b)
 }
 
+function browserResultOk(out) {
+  return !out?.wafBlocked && !out?.turnstileFailed && out?.status !== 0
+}
+
+/**
+ * 浏览器会自动跟随 30x；拦截每个导航请求并重新校验目标，防止重定向绕过 SSRF 防护。
+ */
+async function installNavigationGuard(page) {
+  await withTimeout(page.setRequestInterception(true), 15000, '启用浏览器地址校验超时')
+  page.on('request', request => {
+    const url = request.url()
+    if (!request.isNavigationRequest() || url === 'about:blank') {
+      request.continue().catch(() => {})
+      return
+    }
+    assertSafeRequestUrl(url).then(() => {
+      request.continue().catch(() => {})
+    }).catch(err => {
+      logger.warn(`[relay-checkin-plugin] 已阻止浏览器访问不安全地址 ${url}: ${err?.message || err}`)
+      request.abort('blockedbyclient').catch(() => {})
+    })
+  })
+}
+
 async function withPage(host, fn) {
   checkBreaker(host)
   await acquirePageSlot()
@@ -293,9 +318,10 @@ async function withPage(host, fn) {
       if (proxy?.auth) await withTimeout(page.authenticate(proxy.auth), 15000, '设置代理认证超时')
       await withTimeout(page.setUserAgent(getConfig().request.userAgent), 15000, '设置 UA 超时（浏览器无响应）')
       await withTimeout(page.evaluateOnNewDocument(STEALTH_SCRIPT), 15000, '注入初始化脚本超时（浏览器无响应）')
+      await installNavigationGuard(page)
       logger.info('[relay-checkin-plugin] 页面初始化完成')
       const out = await fn(page)
-      noteResult(host, !out?.wafBlocked)
+      noteResult(host, browserResultOk(out))
       return out
     } catch (err) {
       noteResult(host, false)
@@ -320,6 +346,7 @@ async function withPage(host, fn) {
 async function pageFetch(page, url, { method = 'GET', headers = {}, timeoutMs: override = null } = {}) {
   const timeoutMs = override ?? (getConfig().request.timeout || 15) * 1000
   try {
+    await assertSafeRequestUrl(url)
     const evaluating = page.evaluate(async ({ url, method, headers, timeoutMs }) => {
       // 用 AbortController 而非 AbortSignal.timeout：后者要 Chrome 103+，
       // 内置 Chromium 偏旧时会直接抛 TypeError 使每次请求都失败
@@ -406,7 +433,7 @@ export async function fetchWafCookies(account) {
     }
     await logPageState(page)
 
-    if (!cookies.length) return { wafBlocked: true }
+    if (!cookies.some(c => /^acw_sc__v2$/i.test(c.name))) return { wafBlocked: true }
     const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ')
     logger.info(`[relay-checkin-plugin] 已取得 ${cookies.length} 个 cookie，改用普通 HTTP 调用接口`)
     return { cookieHeader }

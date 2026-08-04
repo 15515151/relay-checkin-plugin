@@ -1,14 +1,14 @@
 import { getConfig } from '../models/config.js'
 import { touchEntry, upsertAccount, removeAccount, setAuto, setAccountAuto, accountLabel, persist, setPushGroup, rememberGroup } from '../models/store.js'
 import { probeAccount, normalizeBaseUrl, getAdapter, cookieTypeForHost } from '../models/adapters/index.js'
-import { checkinEntry, checkinAccount, queryEntry, refreshBalances } from '../models/executor.js'
+import { checkinEntry, checkinAccount, finalizeCheckinResult, queryEntry, refreshBalances } from '../models/executor.js'
 import { withUserLock } from '../models/lock.js'
 import { renderResult, renderList, renderHelp } from '../models/render.js'
 import { runScheduledCheckin } from '../models/scheduler.js'
 
 /**
  * 等待私聊补发凭据的绑定会话（key: QQ号字符串）
- * { kind: 'token'|'cookie', baseUrl, host, userId, selfId, groupId, messageId,
+ * { kind: 'token'|'cookie'|'email', baseUrl, host, userId, selfId, groupId, messageId,
  *   timer, promptMsgId, promptTimer }
  * groupId/messageId 记录发起流程的群与指令消息，绑定结束后引用该消息回执结果；
  * promptMsgId 为群内「请私聊发送凭据」提示消息，绑定终态时立即撤回，否则到时撤回
@@ -193,6 +193,7 @@ export default class RelayCheckinApp extends plugin {
       priority: 5000,
       rule: [
         { reg: '^#中转(站)?(帮助|help)$', fnc: 'help' },
+        { reg: '^#中转添加邮箱\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addEmail' },
         { reg: '^#中转添加[cC]ookie\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addCookie' },
         { reg: '^#中转添加\\s+\\S+(?:\\s+\\S+)*$', fnc: 'add' },
         { reg: '^#中转列表$', fnc: 'list' },
@@ -260,7 +261,7 @@ export default class RelayCheckinApp extends plugin {
 
   async help() {
     const img = await renderHelp()
-    await this.replyImage(img, '帮助图渲染失败，指令：#中转添加 地址 / #中转列表 / #中转删除 序号 / #中转签到 / #中转查询 / #中转定时 开|关 [序号]')
+    await this.replyImage(img, '帮助图渲染失败，指令：#中转添加 地址 / #中转添加邮箱 AgentRouter地址 / #中转列表 / #中转删除 序号 / #中转签到 / #中转查询 / #中转定时 开|关 [序号]')
     return true
   }
 
@@ -297,7 +298,10 @@ export default class RelayCheckinApp extends plugin {
         name: site.host,
         baseUrl: site.baseUrl,
         type: probe.type,
+        authMode: 'token',
         token,
+        loginEmail: null,
+        password: null,
         siteUserId: siteUserId || probe.info.siteUserId || null,
         signPath: null,
         auto: true
@@ -312,11 +316,58 @@ export default class RelayCheckinApp extends plugin {
   async verifyCookie(site, rawSession, siteUserId) {
     const token = String(rawSession).replace(/^session=/i, '')
     const type = cookieTypeForHost(site.host)
-    const account = { name: site.host, baseUrl: site.baseUrl, type, token, siteUserId, signPath: null, auto: true }
+    const account = {
+      name: site.host,
+      baseUrl: site.baseUrl,
+      type,
+      authMode: 'session',
+      token,
+      loginEmail: null,
+      password: null,
+      siteUserId,
+      signPath: null,
+      auto: true
+    }
     try {
       const info = await guardHang(getAdapter(type).userInfo(account), '验证账号')
       if (!info.ok) return { ok: false, msg: `${info.msg}（请检查 session 与用户ID）` }
       return { ok: true, account, info }
+    } catch (err) {
+      return { ok: false, msg: err.message }
+    }
+  }
+
+  /**
+   * AgentRouter 邮箱登录校验。登录本身会触发签到，因此同时返回首次签到结果，
+   * 保存账号时直接复用，避免第二次登录覆盖“本次到账”状态。
+   */
+  async verifyEmail(site, loginEmail, password) {
+    const normalizedEmail = String(loginEmail || '').trim()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      return { ok: false, msg: '邮箱格式不正确' }
+    }
+    const account = {
+      name: site.host,
+      baseUrl: site.baseUrl,
+      type: 'agentrouter',
+      authMode: 'email',
+      loginEmail: normalizedEmail,
+      password,
+      token: '',
+      siteUserId: null,
+      signPath: null,
+      auto: true
+    }
+    try {
+      const checkin = await guardHang(getAdapter('agentrouter').login(account), '验证 AgentRouter 邮箱登录')
+      if (!checkin.ok) return { ok: false, msg: checkin.msg }
+      if (!account.siteUserId) return { ok: false, msg: '登录成功，但响应缺少站点用户ID' }
+      if (!account.token) return { ok: false, msg: '登录成功，但未取得新的 session cookie' }
+
+      let info = checkin.info
+      if (!info?.ok) info = await guardHang(getAdapter('agentrouter').userInfo(account), '读取 AgentRouter 账号')
+      if (!info?.ok) return { ok: false, msg: info?.msg || '登录后读取账号信息失败' }
+      return { ok: true, account, info, initialCheckin: checkin }
     } catch (err) {
       return { ok: false, msg: err.message }
     }
@@ -330,7 +381,9 @@ export default class RelayCheckinApp extends plugin {
   async startBind(kind, site) {
     const fullCmd = kind === 'cookie'
       ? `#中转添加cookie ${site.host} session值 用户ID`
-      : `#中转添加 ${site.host} 令牌`
+      : (kind === 'email'
+          ? `#中转添加邮箱 ${site.host} 邮箱 AgentRouter站内密码`
+          : `#中转添加 ${site.host} 令牌`)
     const block = await getPrivateBlock(this.e)
     if (block && !block.passable) {
       if (this.e.isGroup) {
@@ -374,7 +427,9 @@ export default class RelayCheckinApp extends plugin {
 
     const need = kind === 'cookie'
       ? 'session值 用户ID（空格分隔）'
-      : '访问令牌（Veloera 站点需再加 空格+站点用户ID）'
+      : (kind === 'email'
+          ? '邮箱 AgentRouter站内密码（空格分隔）'
+          : '访问令牌（Veloera 站点需再加 空格+站点用户ID）')
     // disablePrivate 开启但「中转绑定」被放行时，凭据必须带该前缀才能通过拦截
     const sendAs = block ? `中转绑定 ${need}` : need
     const mins = Math.max(1, Math.round(timeoutSec / 60))
@@ -402,7 +457,7 @@ export default class RelayCheckinApp extends plugin {
 
     if (args.length === 1) {
       if (!site) {
-        await this.reply('站点地址格式不正确，示例：#中转添加 https://xx.com')
+        await this.reply('站点地址格式不正确或被安全策略拒绝，请填写 HTTPS 站点根地址，例如：#中转添加 https://xx.com')
         return true
       }
       await this.startBind('token', site)
@@ -411,7 +466,7 @@ export default class RelayCheckinApp extends plugin {
 
     await this.recallIfGroup()
     if (!site) {
-      await this.reply('站点地址格式不正确，示例：#中转添加 https://xx.com 令牌')
+      await this.reply('站点地址格式不正确或被安全策略拒绝，请填写 HTTPS 站点根地址，例如：#中转添加 https://xx.com 令牌')
       return true
     }
     if (args.length > 3) {
@@ -442,7 +497,7 @@ export default class RelayCheckinApp extends plugin {
 
     if (args.length === 1) {
       if (!site) {
-        await this.reply('站点地址格式不正确，示例：#中转添加cookie https://xx.com')
+        await this.reply('站点地址格式不正确或被安全策略拒绝，请填写 HTTPS 站点根地址，例如：#中转添加cookie https://xx.com')
         return true
       }
       await this.startBind('cookie', site)
@@ -451,7 +506,7 @@ export default class RelayCheckinApp extends plugin {
 
     await this.recallIfGroup()
     if (!site) {
-      await this.reply('站点地址格式不正确，示例：#中转添加cookie https://xx.com session值 用户ID')
+      await this.reply('站点地址格式不正确或被安全策略拒绝，请填写 HTTPS 站点根地址，例如：#中转添加cookie https://xx.com session值 用户ID')
       return true
     }
     if (args.length !== 3) {
@@ -469,6 +524,49 @@ export default class RelayCheckinApp extends plugin {
         return
       }
       await this.saveAccount(r.account, r.info)
+    })
+    return true
+  }
+
+  /**
+   * #中转添加邮箱 地址                → 发起 AgentRouter 邮箱绑定
+   * #中转添加邮箱 地址 邮箱 站内密码  → 直接添加（建议仅私聊使用）
+   */
+  async addEmail() {
+    const args = String(this.e.msg).trim().split(/\s+/).slice(1)
+    const site = this.parseSite(args[0])
+
+    if (args.length === 1) {
+      if (!site) {
+        await this.reply('站点地址格式不正确或被安全策略拒绝，例如：#中转添加邮箱 https://agentrouter.org')
+        return true
+      }
+      if (cookieTypeForHost(site.host) !== 'agentrouter') {
+        await this.reply('邮箱登录绑定目前仅用于 AgentRouter（agentrouter.org / *.air-outer.com）')
+        return true
+      }
+      await this.startBind('email', site)
+      return true
+    }
+
+    await this.recallIfGroup()
+    if (!site || cookieTypeForHost(site.host) !== 'agentrouter') {
+      await this.reply('请填写 AgentRouter 的 HTTPS 根地址，例如：#中转添加邮箱 https://agentrouter.org 邮箱 站内密码')
+      return true
+    }
+    if (args.length !== 3) {
+      await this.reply('格式：#中转添加邮箱 地址 邮箱 AgentRouter站内密码（推荐只发地址，再私聊补发凭据）')
+      return true
+    }
+
+    await this.runLocked('添加 AgentRouter 邮箱账号', async () => {
+      await this.reply('正在重新登录并验证签到，请稍候...')
+      const r = await this.verifyEmail(site, args[1], args[2])
+      if (!r.ok) {
+        await this.reply(`添加失败：${r.msg}`)
+        return
+      }
+      await this.saveAccount(r.account, r.info, r.initialCheckin)
     })
     return true
   }
@@ -497,7 +595,7 @@ export default class RelayCheckinApp extends plugin {
     const pending = pendingBinds.get(key)
     if (!pending) {
       if (prefixed) {
-        await this.reply('当前没有等待绑定的站点，请先发送：#中转添加 地址（或 #中转添加cookie 地址）')
+        await this.reply('当前没有等待绑定的站点，请先发送：#中转添加 地址、#中转添加cookie 地址 或 #中转添加邮箱 地址')
         return true
       }
       return false
@@ -513,10 +611,19 @@ export default class RelayCheckinApp extends plugin {
       }
       return false
     }
-    if (pending.kind === 'cookie' && parts.length < 2) {
+    if (pending.kind === 'cookie' && parts.length !== 2) {
       // 用户走「中转绑定」前缀（disablePrivate 放行）时，重发也必须带前缀才不被拦截
       const fmt = prefixed ? '中转绑定 session值 用户ID' : 'session值 用户ID'
-      await this.reply(`还缺站点用户ID，请一次性发送：${fmt}（空格分隔）`)
+      await this.reply(`请一次性发送：${fmt}（空格分隔，不能多填参数）`)
+      return true
+    }
+    if (pending.kind === 'email' && parts.length !== 2) {
+      const fmt = prefixed ? '中转绑定 邮箱 AgentRouter站内密码' : '邮箱 AgentRouter站内密码'
+      await this.reply(`请一次性发送：${fmt}（空格分隔；不是 GitHub/LinuxDO 密码）`)
+      return true
+    }
+    if (pending.kind === 'token' && parts.length > 2) {
+      await this.reply('参数过多，请发送：令牌 [站点用户ID]')
       return true
     }
 
@@ -533,7 +640,9 @@ export default class RelayCheckinApp extends plugin {
         await this.reply('正在验证账号，请稍候...')
         const r = pending.kind === 'cookie'
           ? await this.verifyCookie(site, parts[0], parts[1])
-          : await this.verifyToken(site, parts[0], parts[1] || null)
+          : (pending.kind === 'email'
+              ? await this.verifyEmail(site, parts[0], parts[1])
+              : await this.verifyToken(site, parts[0], parts[1] || null))
 
         if (!r.ok) {
           await recallBindPrompt(pending)
@@ -542,8 +651,8 @@ export default class RelayCheckinApp extends plugin {
           return
         }
 
-        const { entry, statusText, checkinRow, balance } = await this.saveAccount(r.account, r.info)
-        // 群里发起的绑定：把该群记入候选推送群（私聊补发凭据时事件里没有群号）
+        const { entry, statusText, checkinRow, balance } = await this.saveAccount(r.account, r.info, r.initialCheckin)
+        // 群里发起的绑定：保留最近使用群信息（私聊补发凭据时事件里没有群号）
         if (pending.groupId) {
           rememberGroup(entry, pending.groupId)
           persist()
@@ -576,7 +685,7 @@ export default class RelayCheckinApp extends plugin {
    * （已签会识别为今日已签，未签顺带签上，让列表的签到状态从添加起就准确），
    * 并回复含添加与签到两条结果的图片
    */
-  async saveAccount(account, info) {
+  async saveAccount(account, info, initialCheckin = null) {
     account.username = info.username || ''
     account.lastBalance = info.balanceText || '-'
     const { entry, updated, account: stored } = upsertAccount(this.e, account)
@@ -584,7 +693,9 @@ export default class RelayCheckinApp extends plugin {
 
     let checkinRow
     try {
-      checkinRow = await guardHang(checkinAccount(stored), '签到')
+      checkinRow = initialCheckin
+        ? finalizeCheckinResult(stored, initialCheckin, { afterInfo: info })
+        : await guardHang(checkinAccount(stored), '签到')
       // 缓存落盘失败不能让一次成功的签到被报成失败
       try {
         persist()
@@ -721,7 +832,7 @@ export default class RelayCheckinApp extends plugin {
 
   /**
    * #中转开启群推送 / #中转关闭群推送（兼容 #中转开启定时签到群推送）
-   * 定时签到结果只推送到开启过的群（白名单）；仅群主/管理员/机器人主人可操作
+   * 开启过的群是固定推送目标，将收到全部定时签到结果；仅群主/管理员/机器人主人可操作
    */
   async togglePushGroup() {
     if (!this.e.isGroup) {
@@ -740,7 +851,7 @@ export default class RelayCheckinApp extends plugin {
     const changed = setPushGroup(this.e.group_id, enable)
     if (enable) {
       await this.reply(changed
-        ? '已开启本群的定时签到结果推送（群内有人绑定过账号且仍在群时才会实际推送）'
+        ? '已开启本群的定时签到结果推送（将推送全部用户的定时签到结果）'
         : '本群已处于开启状态')
     } else {
       await this.reply(changed ? '已关闭本群的定时签到结果推送' : '本群本来就未开启推送')

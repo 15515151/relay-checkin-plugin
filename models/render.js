@@ -59,7 +59,8 @@ export async function renderResultPages({ title, users }) {
  */
 export async function renderList({ nickname, userId, autoCheckin, accounts }) {
   const rows = accounts.map((acc, i) => {
-    const checkedToday = isCheckedToday(acc.lastCheckinAt)
+    const checkedToday = acc.lastCheckinConfirmed !== false && isCheckedToday(acc.lastCheckinAt)
+    const uncertainToday = acc.lastCheckinConfirmed === false && isCheckedToday(acc.lastCheckinAttemptAt)
     const autoOn = acc.auto !== false
     return {
       index: i + 1,
@@ -67,9 +68,11 @@ export async function renderList({ nickname, userId, autoCheckin, accounts }) {
       baseUrl: acc.baseUrl,
       typeLabel: { newapi: 'new-api', veloera: 'Veloera', generic: 'Cookie', agentrouter: 'AgentRouter', anyrouter: 'AnyRouter' }[acc.type] || acc.type,
       tokenMasked: maskToken(acc.token),
+      credentialLabel: acc.authMode === 'email' ? '邮箱' : '令牌',
+      credentialMasked: acc.authMode === 'email' ? maskEmail(acc.loginEmail) : maskToken(acc.token),
       balance: acc.lastBalance || '-',
-      checkinText: checkedToday ? '今日已签' : '今日未签',
-      checkinClass: checkedToday ? 'on' : 'off',
+      checkinText: checkedToday ? '今日已签' : (uncertainToday ? '签到未确认' : '今日未签'),
+      checkinClass: checkedToday ? 'on' : (uncertainToday ? 'warn' : 'off'),
       autoText: autoOn ? '定时开' : '定时关',
       autoClass: autoOn ? 'on' : 'off'
     }
@@ -84,7 +87,7 @@ export async function renderList({ nickname, userId, autoCheckin, accounts }) {
 }
 
 /**
- * lastCheckinAt 是否为今天（本地时区；仅统计经本插件签到/保活成功的记录）
+ * lastCheckinAt 是否为今天（本地时区；仅统计有接口证据确认的签到记录）
  */
 function isCheckedToday(iso) {
   if (!iso) return false
@@ -105,4 +108,11 @@ function maskToken(token) {
   const t = String(token || '')
   if (t.length <= 8) return '****'
   return t.slice(0, 4) + '****' + t.slice(-4)
+}
+
+function maskEmail(email) {
+  const value = String(email || '')
+  const at = value.indexOf('@')
+  if (at <= 0) return '****'
+  return value.slice(0, 1) + '***' + value.slice(at)
 }

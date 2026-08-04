@@ -14,8 +14,8 @@ let pushGroupsCache = null
  *   "u:QQ号": {
  *     groupId, userId, selfId, nickname,
  *     autoCheckin: true,
- *     accounts: [{ name, baseUrl, type, token, siteUserId, signPath,
- *                  username, auto, lastBalance, lastCheckinAt }]
+ *     accounts: [{ name, baseUrl, type, authMode, token, siteUserId, signPath,
+ *                  username, loginEmail, password, auto, lastBalance, lastCheckinAt }]
  *   }
  * }
  * 按用户隔离：同一 QQ 在任意群/私聊共享同一份账号数据；
@@ -97,12 +97,12 @@ export function ensureEntry(e) {
 function applyEvent(entry, e) {
   entry.nickname = e.sender?.card || e.sender?.nickname || entry.nickname || String(e.user_id)
   entry.selfId = String(e.self_id ?? entry.selfId)
-  // 群内使用时把该群记入候选列表；私聊使用不清空，保持推回用过的群
+  // 继续记录最近使用群以兼容已有账号数据；固定群推送不再依赖该字段
   if (e.isGroup && e.group_id) rememberGroup(entry, e.group_id)
   else normalizeGroups(entry)
 }
 
-// 记录的候选推送群上限（最近使用优先）
+// 兼容字段最多保留 5 个最近使用群
 const MAX_GROUPS = 5
 
 /**
@@ -115,8 +115,8 @@ function normalizeGroups(entry) {
 }
 
 /**
- * 把某群提到候选推送群列表首位（最近使用优先，去重、限长）。
- * 记多个群是为了：用户最近用指令的群若未开启推送，还能推到他用过的其他已开启群
+ * 把某群提到最近使用群列表首位（最近使用优先，去重、限长）。
+ * 该字段仅用于兼容已有账号数据，不参与固定群推送目标选择。
  */
 export function rememberGroup(entry, groupId) {
   normalizeGroups(entry)
@@ -126,7 +126,7 @@ export function rememberGroup(entry, groupId) {
 }
 
 /**
- * 候选推送群列表（最近使用优先）
+ * 最近使用群列表（兼容旧数据）
  */
 export function groupCandidates(entry) {
   if (Array.isArray(entry.groupIds) && entry.groupIds.length) return entry.groupIds
@@ -135,13 +135,14 @@ export function groupCandidates(entry) {
 
 /**
  * 添加或更新账号：同站点同站点用户ID（都缺ID时同令牌）视为同一账号更新凭据，
+ * AgentRouter 官方域名与 *.air-outer.com 备用域名按同一站点处理；
  * 否则作为新账号追加（同站多账号）；更新时保留 auto 偏好与运行时缓存
  * @returns {{entry: object, index: number, updated: boolean, account: object}} account 为入库后的对象引用
  */
 export function upsertAccount(e, account) {
   const entry = ensureEntry(e)
   const idx = entry.accounts.findIndex(acc =>
-    acc.baseUrl === account.baseUrl &&
+    sameSite(acc, account) &&
     (acc.siteUserId != null && account.siteUserId != null
       ? String(acc.siteUserId) === String(account.siteUserId)
       : acc.token === account.token)
@@ -155,6 +156,21 @@ export function upsertAccount(e, account) {
   entry.accounts.push(account)
   save()
   return { entry, index: entry.accounts.length, updated: false, account }
+}
+
+function sameSite(left, right) {
+  if (left.baseUrl === right.baseUrl) return true
+  return officialAgentRouterHost(left) && officialAgentRouterHost(right)
+}
+
+function officialAgentRouterHost(account) {
+  if (account?.type !== 'agentrouter') return false
+  try {
+    const host = new URL(account.baseUrl).hostname.toLowerCase()
+    return host === 'agentrouter.org' || host === 'air-outer.com' || host.endsWith('.air-outer.com')
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -211,18 +227,22 @@ export function persist() {
 }
 
 /**
- * 定时推送白名单（data/push_groups.json，群号字符串数组）：
- * 群推送模式下只有名单内的群才会收到定时签到结果
+ * 固定群推送目标（data/push_groups.json，群号字符串数组）。
+ * 每次读取文件，确保手工修改名单后无需重启即可在下一轮推送生效。
  */
 function loadPushGroups() {
-  if (pushGroupsCache) return pushGroupsCache
   try {
-    pushGroupsCache = fs.existsSync(PUSH_GROUPS_PATH)
+    const parsed = fs.existsSync(PUSH_GROUPS_PATH)
       ? JSON.parse(fs.readFileSync(PUSH_GROUPS_PATH, 'utf-8'))
       : []
-    if (!Array.isArray(pushGroupsCache)) pushGroupsCache = []
+    pushGroupsCache = Array.isArray(parsed)
+      ? [...new Set(parsed
+          .filter(groupId => typeof groupId === 'string' || typeof groupId === 'number')
+          .map(groupId => String(groupId).trim())
+          .filter(Boolean))]
+      : []
   } catch (err) {
-    logger.error(`[relay-checkin-plugin] 推送白名单读取失败: ${err.message}`)
+    logger.error(`[relay-checkin-plugin] 群推送目标读取失败: ${err.message}`)
     pushGroupsCache = []
   }
   return pushGroupsCache
@@ -240,6 +260,13 @@ function savePushGroups() {
  */
 export function isPushGroup(groupId) {
   return loadPushGroups().includes(String(groupId))
+}
+
+/**
+ * 所有固定群推送目标。返回副本，避免调用方修改内存中的名单。
+ */
+export function getPushGroups() {
+  return [...loadPushGroups()]
 }
 
 /**

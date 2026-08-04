@@ -9,6 +9,7 @@ export default {
   type: 'newapi',
   label: 'new-api',
   checkinPath: '/api/user/checkin',
+  compareBalance: true,
 
   buildHeaders(account) {
     const headers = {
@@ -27,11 +28,34 @@ export default {
     return parseUserInfo(json)
   },
 
+  async getCheckinStatus(account) {
+    const now = new Date()
+    const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+    const today = `${month}-${String(now.getDate()).padStart(2, '0')}`
+    const res = await request(`${account.baseUrl}/api/user/checkin?month=${month}`, {
+      headers: this.buildHeaders(account)
+    })
+    if (res.status === 404) return { supported: false }
+    const stats = res.json?.data?.stats
+    if (!res.json?.success || typeof stats?.checked_in_today !== 'boolean') {
+      return { supported: true, ok: false, msg: res.json?.message || res.json?.msg || `签到状态查询失败 (HTTP ${res.status})` }
+    }
+    const todayRecord = Array.isArray(stats.records)
+      ? stats.records.find(record => record?.checkin_date === today)
+      : null
+    return {
+      supported: true,
+      ok: true,
+      checked: stats.checked_in_today,
+      awardQuota: todayRecord?.quota_awarded ?? null
+    }
+  },
+
   async checkin(account) {
-    const { status, json } = await request(`${account.baseUrl}/api/user/checkin`, {
+    const res = await request(`${account.baseUrl}/api/user/checkin`, {
       method: 'POST',
       headers: this.buildHeaders(account)
     })
-    return parseCheckinResult(status, json)
+    return parseCheckinResult(res.status, res.json, res)
   }
 }
