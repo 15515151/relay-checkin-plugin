@@ -22,6 +22,17 @@ export function cookieTypeForHost(host) {
 }
 
 /**
+ * 需要专用凭据流程的站点：令牌入口不能正确完成 AnyRouter/AgentRouter 绑定。
+ * 普通 new-api/Veloera 站点返回 null，继续走令牌自动探测。
+ */
+export function preferredBindingForHost(host) {
+  const type = cookieTypeForHost(host)
+  if (type === 'anyrouter') return 'cookie'
+  if (type === 'agentrouter') return 'email'
+  return null
+}
+
+/**
  * 规范化站点地址：去尾部斜杠、补 https://
  */
 export function normalizeBaseUrl(input) {

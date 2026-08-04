@@ -422,7 +422,7 @@ try {
   console.log('adapters/common OK')
 
   // ---- adapters/index ----
-  const { normalizeBaseUrl, cookieTypeForHost, getAdapter } = await import('../models/adapters/index.js')
+  const { normalizeBaseUrl, cookieTypeForHost, preferredBindingForHost, getAdapter } = await import('../models/adapters/index.js')
   assert.equal(normalizeBaseUrl('xx.com/'), 'https://xx.com')
   assert.throws(() => normalizeBaseUrl('http://a.b'), /HTTPS/)
   assert.throws(() => normalizeBaseUrl('https://127.0.0.1'), /不允许/)
@@ -436,6 +436,9 @@ try {
   assert.equal(cookieTypeForHost('ps.air-outer.com'), 'agentrouter', 'air-outer.com 系域名应识别为 AgentRouter')
   assert.equal(cookieTypeForHost('anyrouter.top'), 'anyrouter')
   assert.equal(cookieTypeForHost('other.com'), 'generic')
+  assert.equal(preferredBindingForHost('anyrouter.top'), 'cookie', 'AnyRouter 应引导 Cookie 绑定')
+  assert.equal(preferredBindingForHost('ps.air-outer.com'), 'email', 'AgentRouter 应引导邮箱绑定')
+  assert.equal(preferredBindingForHost('newapi.example.com'), null, '普通站点应继续走令牌探测')
   assert.equal(getAdapter('veloera').type, 'veloera')
   assert.equal(getAdapter('不存在').type, 'newapi')
   console.log('adapters/index OK')
