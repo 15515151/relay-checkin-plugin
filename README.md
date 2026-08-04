@@ -37,8 +37,8 @@ git clone https://github.com/Cat-bl/relay-checkin-plugin ./plugins/relay-checkin
 | `#中转添加 地址` | 发起令牌绑定；AnyRouter/AgentRouter 会提示改用专用绑定指令 |
 | `#中转添加 地址 令牌` | 直接添加，自动识别类型（建议只在私聊使用） |
 | `#中转添加 地址 令牌 用户ID` | Veloera 站点需附加站点用户ID |
-| `#中转添加cookie 地址` | 发起 Cookie 绑定，随后私聊发送 `session值 用户ID` |
-| `#中转添加cookie 地址 session值 用户ID` | Cookie 方式直接添加（AnyRouter / AgentRouter / 旧版站点，按域名自动识别） |
+| `#中转添加cookie 地址` | AnyRouter/旧版站点发起 Cookie 绑定，随后私聊发送 `session值 用户ID` |
+| `#中转添加cookie 地址 session值 用户ID` | Cookie 方式直接添加（AnyRouter / 旧版站点；AgentRouter 会引导邮箱绑定） |
 | `#中转添加邮箱 地址` | 发起 AgentRouter 邮箱登录绑定，随后私聊发送 `邮箱 站内密码`（推荐） |
 | `#中转添加邮箱 地址 邮箱 站内密码` | AgentRouter 邮箱登录直接添加（仅建议私聊使用） |
 | `#中转列表` | 我的账号列表（含余额、今日签到状态、定时开关） |
@@ -56,19 +56,14 @@ AnyRouter 请使用 `#中转添加cookie 地址`，随后私聊发送 `session�
 
 同一站点可添加多个账号：按站点用户ID区分，只有同一站点用户重复添加时才会更新凭据。
 
-AgentRouter 添加示例：浏览器登录 agentrouter.org（或 ps.air-outer.com 等同系域名，自动识别）后按 F12，从请求中复制 `session` cookie 值与 `New-Api-User` 头的用户ID，然后群里发送：
-
-```
-#中转添加cookie agentrouter.org
-```
-
-Cookie 方式只能查询余额，会显示“Session 有效·未重登”。要自动领取每日 `$25`，先在 AgentRouter 重置一个站内登录密码，然后发送：
+AgentRouter 自动签到请使用邮箱登录绑定：先在 agentrouter.org（或 ps.air-outer.com 等同系域名）重置站内密码，然后发送：
 
 ```
 #中转添加邮箱 agentrouter.org
 ```
 
-再私聊机器人发送 `<邮箱> <AgentRouter站内密码>`。这里不是 GitHub/LinuxDO 密码。插件定时执行时会用不携带旧 Session 的请求重新登录，读取官方响应的 `checked_in` 字段、保存新 Session，并用前后余额复核奖励。
+随后私聊机器人发送邮箱和 AgentRouter 站内密码。AgentRouter 的 Cookie 方式不用于自动签到；误用 `#中转添加cookie` 时插件会直接提示改用邮箱绑定。
+这里不是 GitHub/LinuxDO 密码。插件定时执行时会用不携带旧 Session 的请求重新登录，读取官方响应的 `checked_in` 字段、保存新 Session，并用前后余额复核奖励。
 
 ### 机器人开启了私聊禁用（disablePrivate）怎么办
 

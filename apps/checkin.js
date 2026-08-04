@@ -83,6 +83,11 @@ function specializedBindingHint(site) {
   return null
 }
 
+function agentRouterCookieHint(site) {
+  if (preferredBindingForHost(site?.host) !== 'email') return null
+  return `检测到 ${site.host} 是 AgentRouter，Cookie 只能查询余额，不能自动领取每日 $25。请改用：\n#中转添加邮箱 ${site.baseUrl}\n随后私聊发送：邮箱 AgentRouter站内密码`
+}
+
 /**
  * 按账号数量与类型生成签到等待提示：账号多或含需过 WAF/人机验证的站点时
  * 明确告知预计耗时，避免用户以为卡死而重复发指令
@@ -511,10 +516,18 @@ export default class RelayCheckinApp extends plugin {
   /**
    * #中转添加cookie 地址                  → 发起绑定，私聊补发 session 与用户ID
    * #中转添加cookie 地址 session值 用户ID → 直接添加（建议私聊使用）
+   * AgentRouter 的 Cookie 只能查余额，统一引导到邮箱登录流程。
    */
   async addCookie() {
     const args = String(this.e.msg).trim().split(/\s+/).slice(1)
     const site = this.parseSite(args[0])
+
+    const agentRouterHint = agentRouterCookieHint(site)
+    if (agentRouterHint) {
+      if (args.length > 1) await this.recallIfGroup()
+      await this.reply(agentRouterHint)
+      return true
+    }
 
     if (args.length === 1) {
       if (!site) {
