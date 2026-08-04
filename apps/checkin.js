@@ -262,7 +262,7 @@ export default class RelayCheckinApp extends plugin {
 
   async help() {
     const img = await renderHelp()
-    await this.replyImage(img, '帮助图渲染失败，指令：#中转添加 地址 / #中转添加邮箱 AgentRouter地址 / #中转列表 / #中转删除 序号 / #中转签到 / #中转查询 / #中转定时 开|关 [序号]')
+    await this.replyImage(img, '帮助图渲染失败，指令：#中转添加 地址 / #中转添加邮箱 AgentRouter地址 / #中转列表 / #中转删除 序号 / #中转签到 [序号] / #中转查询 / #中转定时 开|关 [序号]')
     return true
   }
 
@@ -776,7 +776,9 @@ export default class RelayCheckinApp extends plugin {
 
     await this.runLocked('签到', async () => {
       const targets = index ? [entry.accounts[index - 1]] : entry.accounts
-      await this.reply(progressTip(targets))
+      await this.reply(index
+        ? `正在签到 [${index}] ${accountLabel(targets[0])}，请稍候...`
+        : progressTip(targets))
       const results = await checkinEntry(entry, { index })
       const img = await renderResult({
         title: '中转站签到',

@@ -7,7 +7,8 @@ TRSS-Yunzai 中转站自动签到插件（OneBot v11）。支持主流开源中�
 - 自动识别站点类型（new-api 令牌 / Veloera 令牌 / AnyRouter / AgentRouter / Cookie 通用）
 - 群内隐私绑定：群里只发 `#中转添加 地址`，令牌/session 私聊补发，超时/失败/成功都会引用原消息回群提示
 - 同一站点支持多个账号（按站点用户ID区分，同一账号重复添加只更新凭据）；添加/更新成功后自动签到一次，未签的顺带签上、已签的正确标记为今日已签
-- Cloudflare Turnstile 站点自动降级浏览器方案：页面内完成挑战取 token 后签到
+- Cloudflare Turnstile 站点自动降级浏览器方案：页面内尝试完成非交互挑战，失败时记录具体阶段与错误码
+- 兼容部分 NewAPI 魔改站的网页 `X-Game-*` 完整性校验：服务端明确拒绝后补齐公开网页所用请求头再试一次
 - AnyRouter（anyrouter.top）支持：无头浏览器过阿里云 WAF 后页内签到
 - AgentRouter（agentrouter.org / *.air-outer.com）：支持重置站内密码后的邮箱登录签到，依据官方登录响应与余额变化确认 `$25`；旧 Cookie 模式仅验证 Session，不把保活误报为签到
 - 每日定时签到，触发时间随机抖动、账号间随机间隔；每个账号可单独开关定时（默认开）
@@ -89,7 +90,7 @@ AnyRouter 同理（`#中转添加cookie anyrouter.top <session值> <用户ID>`�
   - 一个群都没推成功时（未配置目标群 / 机器人已退群或被禁言）自动**私聊兜底**，不会静默丢结果
 - `push.usersPerImage`：群合并转发每张图最多展示的用户数（默认 5）
 - `browser.enable`：无头浏览器方案开关（AnyRouter 过 WAF、Turnstile 站点降级签到）
-- `request.retry`：只读请求网络失败后的重试次数（默认 2）；签到 `POST` 固定只发送一次，响应不确定时改用状态接口复核
+- `request.retry`：只读请求网络失败后的重试次数（默认 2）；签到 `POST` 通常只发送一次，响应不确定时改用状态接口复核。仅当站点明确返回缺少 `X-Game-*` 完整性标记时，才会补齐该标记再发一次
 - `security.allowHttp`：是否允许添加 HTTP 站点（默认 `false`）
 - `security.allowedPrivateHosts`：允许访问的本机/内网站点例外列表，支持精确域名和 `*.example.com`；只应由机器人主人配置
 - `bind.timeoutSec`：发起绑定后等待私聊补发凭据的超时秒数（默认 300）
@@ -103,7 +104,7 @@ AnyRouter 同理（`#中转添加cookie anyrouter.top <session值> <用户ID>`�
 
 ## 已知限制
 
-- Turnstile 浏览器方案依赖 Cloudflare 对无头环境的评分，非交互式挑战通常可自动通过；要求点击验证的站点可能失败，会在结果中提示
+- Turnstile 浏览器方案依赖 Cloudflare 对无头环境的评分，不能保证自动通过；要求点击或其他人工交互的挑战不会尝试绕过，会在结果与日志中提示超时阶段或组件错误码
 - AnyRouter 的 WAF 策略可能变化，若持续提示「WAF 未放行」可稍后重试或提 issue
 - anyrouter.top 国内网络无法直连（报「网络请求失败: fetch failed」即是），需在 `data/config.yaml` 配置 `proxy.url` 代理（复用 Yunzai 自带的 https-proxy-agent，无需额外安装）
 - Cookie 方式的 session 有效期约 1 个月，失效后需重新添加；AgentRouter 邮箱模式会自动保存每次登录返回的新 Session

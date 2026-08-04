@@ -65,6 +65,9 @@ async function render(tplName, data) {
     tplFile: path.join(TPL_PATH, `${tplName}.html`),
     pluResPath: path.join(PLUGIN_PATH, 'resources') + path.sep,
     saveId: `${tplName}_${renderSeq}`,
+    // TRSS-Yunzai defaults to JPEG 90. The templates contain dense small text,
+    // so keep the first-generation image lossless before QQ processes it.
+    imgType: 'png',
     ...data
   })
 }

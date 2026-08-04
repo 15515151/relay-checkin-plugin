@@ -60,7 +60,6 @@ const adapter = {
     if (session) account.token = session
     if (data.id != null) account.siteUserId = data.id
 
-    const info = parseUserInfo(json)
     const checkedIn = typeof data.checked_in === 'boolean' ? data.checked_in : null
     if (checkedIn === true) {
       return {
@@ -68,9 +67,7 @@ const adapter = {
         already: false,
         confirmed: true,
         awardQuota: await readLoginAwardQuota(account),
-        statusTextOverride: '邮箱登录签到成功',
-        balanceText: info.balanceText,
-        info
+        statusTextOverride: '邮箱登录签到成功'
       }
     }
     if (checkedIn === false) {
@@ -78,9 +75,7 @@ const adapter = {
         ok: true,
         already: true,
         confirmed: true,
-        statusTextOverride: '今日已签（登录复核）',
-        balanceText: info.balanceText,
-        info
+        statusTextOverride: '今日已签（登录复核）'
       }
     }
     return {
@@ -88,9 +83,7 @@ const adapter = {
       already: false,
       confirmed: false,
       msg: '邮箱登录成功，但响应缺少 checked_in 字段，无法确认是否发放签到额度',
-      statusTextOverride: '登录成功·签到未确认',
-      balanceText: info.balanceText,
-      info
+      statusTextOverride: '登录成功·签到未确认'
     }
   },
 

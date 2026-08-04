@@ -24,10 +24,11 @@ const STATUS_TEXT = { ok: '签到成功', already: '今日已签', unknown: '签
 
 /**
  * 站点回复是否属于「需要人机验证」类拦截（应降级到浏览器方案重试）：
- * 除 Turnstile 明示外，部分魔改站提示「缺少完整性标记 / 请刷新页面 / 验证失败」等
+ * 仅匹配明确的人机验证提示。网页 X-Game-* 完整性标记由 NewAPI 适配器单独处理，
+ * 不能把所有「完整性 / 请刷新」错误误报成 Turnstile。
  */
 function needsBrowser(msg) {
-  return /turnstile|完整性|刷新页面|人机|验证码|captcha|verif/i.test(String(msg || ''))
+  return /turnstile|人机|验证码|captcha|访问验证|checking your browser/i.test(String(msg || ''))
 }
 
 /**
@@ -51,7 +52,7 @@ async function turnstileFallback(account, adapter) {
     siteKey
   })
   if (res.turnstileFailed) {
-    return { ok: false, already: false, msg: 'Turnstile 挑战未通过（站点可能要求交互验证）' }
+    return { ok: false, already: false, msg: res.message || 'Turnstile 挑战未通过（站点可能要求交互验证）' }
   }
   const parsed = parseCheckinResult(res.status, res.json, res)
   if (!parsed.ok && needsBrowser(parsed.msg)) {
@@ -175,7 +176,8 @@ export async function checkinAccount(account) {
 
 /**
  * 把适配器结果整理成统一展示行，并更新账号运行状态。
- * 邮箱绑定时首次登录本身已经完成签到，可复用该结果避免重复登录。
+ * AgentRouter 邮箱登录响应的 quota 可能是 0 占位值；登录后会用新 Session
+ * 再查一次 /api/user/self，不能把登录响应余额直接用于结果图。
  */
 export function finalizeCheckinResult(account, r, { beforeInfo = null, afterInfo = null } = {}) {
   const result = { name: accountLabel(account), status: 'fail', statusText: '', award: '', balance: '-', msg: '' }

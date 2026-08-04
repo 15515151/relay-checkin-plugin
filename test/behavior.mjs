@@ -73,7 +73,8 @@ try {
       loginCookieHeader = opts.headers.Cookie
       return {
         status: 200,
-        body: { success: true, data: { id: 7, username: 'u', checked_in: true, quota: 17500000, used_quota: 0 } },
+        // 真实 AgentRouter 登录响应可能返回 quota=0 占位值，不能用于结果图余额。
+        body: { success: true, data: { id: 7, username: 'u', checked_in: true, quota: 0, used_quota: 0 } },
         setCookies: ['session=NEW_SESSION; Path=/; HttpOnly']
       }
     },
@@ -95,9 +96,14 @@ try {
 
   // executor 组合：签到前后余额复核，结果明确显示本次 +$25.00。
   let selfCalls = 0
-  routes['GET https://agentrouter.org/api/user/self'] = () => {
+  const selfCookies = []
+  routes['GET https://agentrouter.org/api/user/self'] = opts => {
     selfCalls++
-    return { status: 200, body: { success: true, data: { id: 7, quota: 5000000, used_quota: 0 } } }
+    selfCookies.push(opts.headers.Cookie)
+    return {
+      status: 200,
+      body: { success: true, data: { id: 7, quota: selfCalls === 1 ? 5000000 : 17500000, used_quota: 0 } }
+    }
   }
   emailAccount = { ...EMAIL_AR }
   const emailResult = await checkinAccount(emailAccount)
@@ -105,7 +111,8 @@ try {
   assert.equal(emailResult.statusText, '邮箱登录签到成功')
   assert.equal(emailResult.award, '+$25.00')
   assert.equal(emailResult.balance, '$35.00')
-  assert.equal(selfCalls, 1, '登录响应已含新余额时无需再次查询 self')
+  assert.equal(selfCalls, 2, '邮箱登录后必须用新 Session 再查询一次真实余额')
+  assert.deepEqual(selfCookies, ['session=S', 'session=NEW_SESSION'])
 
   // checked_in=false 表示本次登录未新增，按今日已签展示。
   routes = {
@@ -183,17 +190,47 @@ try {
   r = await agentrouter.checkin(AR)
   assert.equal(r.ok, false)
 
-  // ---- 3.4 人机验证类拦截：browser.enable=false 时不降级，原因原样透出 ----
-  // （needsBrowser 覆盖 turnstile 明示与「缺少完整性标记/请刷新页面」等魔改站提示）
-  for (const msg of ['Turnstile token 为空', '游戏动作缺少完整性标记，请刷新页面后重试']) {
-    routes = {
-      'POST https://newapi.test/api/user/checkin': { status: 200, body: { success: false, message: msg } },
-      'GET https://newapi.test/api/user/self': { status: 200, body: { success: true, data: { id: 1, quota: 500000, used_quota: 0 } } }
+  // ---- 3.4 NewAPI 网页完整性标记：明确拒绝后补齐 X-Game-* 头安全重试 ----
+  const newapiAdapter = (await import('../models/adapters/newapi.js')).default
+  let integrityCalls = 0
+  let integrityHeaders = null
+  routes = {
+    'POST https://newapi.test/api/user/checkin': opts => {
+      integrityCalls++
+      if (integrityCalls === 1) {
+        return { status: 200, body: { success: false, message: '游戏动作缺少完整性标记，请刷新页面后重试' } }
+      }
+      integrityHeaders = opts.headers
+      return { status: 200, body: { success: true, message: '签到成功', data: { quota_awarded: 250000 } } }
     }
-    const res = await checkinAccount({ name: 'newapi.test', baseUrl: 'https://newapi.test', type: 'newapi', token: 't' })
-    assert.equal(res.status, 'fail')
-    assert.equal(res.balance, '$1.00', '签到失败也应查询余额')
   }
+  const integrityRetried = await newapiAdapter.checkin({
+    name: 'newapi.test', baseUrl: 'https://newapi.test', type: 'newapi', token: 't', siteUserId: 1
+  })
+  assert.equal(integrityRetried.ok, true)
+  assert.equal(integrityCalls, 2, '只有服务端明确拒绝完整性标记时才允许重发 POST')
+  for (const key of [
+    'X-Game-Action-Id', 'X-Game-Client-Ts', 'X-Game-Session-Id',
+    'X-Game-Client-Seq', 'X-Game-Client-Fingerprint', 'X-Game-Body-SHA256'
+  ]) assert.ok(integrityHeaders[key], `完整性重试应携带 ${key}`)
+  assert.equal(integrityHeaders['X-Game-Body-SHA256'], 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+
+  // 完整性重试仍失败时保留站点原始原因，不能误报成缺少 Turnstile site key。
+  routes = {
+    'POST https://newapi.test/api/user/checkin': {
+      status: 200,
+      body: { success: false, message: '游戏动作缺少完整性标记，请刷新页面后重试' }
+    },
+    'GET https://newapi.test/api/user/self': {
+      status: 200,
+      body: { success: true, data: { id: 1, quota: 500000, used_quota: 0 } }
+    }
+  }
+  const integrityFailed = await checkinAccount({ name: 'newapi.test', baseUrl: 'https://newapi.test', type: 'newapi', token: 't' })
+  assert.equal(integrityFailed.status, 'fail')
+  assert.match(integrityFailed.msg, /完整性标记/)
+  assert.doesNotMatch(integrityFailed.msg, /site key/i)
+  assert.equal(integrityFailed.balance, '$1.00', '签到失败也应查询余额')
 
 
   // ---- 3.5 checkinEntry autoOnly：定时任务只签单账号开关打开的 ----
@@ -205,6 +242,9 @@ try {
   assert.equal(autoRes.length, 1, 'autoOnly 应跳过关闭定时的账号')
   const manualRes = await checkinEntry(entryAuto, {})
   assert.equal(manualRes.length, 2, '手动签到不受单账号定时开关影响')
+  const singleRes = await checkinEntry(entryAuto, { index: 2 })
+  assert.equal(singleRes.length, 1, '指定序号时只能执行一个账号')
+  assert.equal(singleRes[0].name, 'off.org', '指定序号应准确选择列表中的对应账号')
 
   // ---- 3.6 refreshBalances：列表刷新余额，HTTP 站实时查、浏览器站保留缓存 ----
   routes = {
@@ -415,6 +455,7 @@ try {
   assert.ok(html.includes('a.com (u1)') && html.includes('abcd****wxyz') && !html.includes('暂无账号'))
   assert.ok(html.includes('余额 $12.30') && html.includes('今日已签') && html.includes('定时开'), '列表应展示余额与签到/定时状态')
   assert.ok(html.includes('账号一') && html.includes('· 1'), '账号大写序号必须同时带普通序号注释')
+  assert.ok(html.includes('#中转签到 序号'), '账号列表应直接提示指定序号单独签到的方法')
   html = art(path.join(tplDir, 'list.html'), {
     nickname: 'N', userId: '1', autoText: '已开启', accountCount: 0, accountCountMark: '零', time: 'T', accounts: []
   })
@@ -422,6 +463,10 @@ try {
 
   html = art(path.join(tplDir, 'help.html'), { time: 'T' })
   assert.ok(html.includes('#中转添加') && html.includes('#中转定时'))
+  for (const file of ['help.html', 'list.html', 'result.html']) {
+    assert.match(fs.readFileSync(path.join(tplDir, file), 'utf8'), /zoom:\s*2/, `${file} 应使用 2 倍像素渲染`)
+  }
+  assert.match(fs.readFileSync(path.join(ROOT, 'models', 'render.js'), 'utf8'), /imgType:\s*'png'/, '模板截图应使用无损 PNG')
   console.log('模板渲染 OK')
 
   console.log('\n全部行为测试通过 ✓')

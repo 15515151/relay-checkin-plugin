@@ -17,6 +17,7 @@
   * { margin: 0; padding: 0; box-sizing: border-box; letter-spacing: 0; }
   body {
     width: 640px;
+    zoom: 2;
     position: relative;
     overflow: hidden;
     padding: 31px 34px 23px;
@@ -55,7 +56,7 @@
     line-height: 1.18;
   }
   .subtitle { margin-top: 6px; color: var(--muted); font-size: 11px; }
-  .meta-time { margin-top: 4px; color: var(--muted); font: 8px Consolas, monospace; }
+  .meta-time { margin-top: 4px; color: var(--muted); font: 10px Consolas, monospace; }
   .seal {
     width: 62px;
     height: 62px;
@@ -70,7 +71,7 @@
     font-weight: 800;
     line-height: 1.15;
   }
-  .seal small { margin-top: 3px; font: 7px Consolas, monospace; }
+  .seal small { margin-top: 3px; font: 9px Consolas, monospace; }
   .summary {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
@@ -80,7 +81,7 @@
   }
   .summary-item { min-width: 0; padding: 9px 9px 10px; border-right: 1px solid var(--line); }
   .summary-item:last-child { border-right: 0; }
-  .summary-label { color: var(--muted); font-size: 9px; }
+  .summary-label { color: var(--muted); font-size: 10px; }
   .summary-count { display: flex; align-items: baseline; gap: 6px; margin-top: 2px; }
   .summary-count b {
     color: var(--ink);
@@ -88,7 +89,7 @@
     font-size: 21px;
     line-height: 1;
   }
-  .summary-count span { color: var(--muted); font-size: 9px; }
+  .summary-count span { color: var(--muted); font-size: 10px; }
   .summary-item.ok b { color: var(--jade); }
   .summary-item.notice b { color: var(--gold); }
   .summary-item.fail b { color: var(--vermilion); }
@@ -108,9 +109,9 @@
     line-height: 1;
   }
   .user-title { min-width: 0; }
-  .user-title small { display: block; color: var(--vermilion); font-size: 8px; font-weight: 700; }
+  .user-title small { display: block; color: var(--vermilion); font-size: 10px; font-weight: 700; }
   .user-name { overflow-wrap: anywhere; font-family: "Noto Serif SC", "SimSun", serif; font-size: 14px; font-weight: 800; }
-  .user-qq { color: var(--muted); font: 8px Consolas, monospace; white-space: nowrap; }
+  .user-qq { color: var(--muted); font: 10px Consolas, monospace; white-space: nowrap; }
   .table-head,
   .acc-row {
     display: grid;
@@ -118,25 +119,25 @@
     gap: 7px;
     align-items: center;
   }
-  .table-head { min-height: 25px; color: #8a958e; border-bottom: 1px solid var(--line); font-size: 8px; }
+  .table-head { min-height: 29px; color: #66736b; border-bottom: 1px solid var(--line); font-size: 10px; }
   .table-head span:nth-child(n+2) { text-align: right; }
-  .acc-row { min-height: 44px; padding: 3px 2px; border-bottom: 1px solid #d8ded9; }
-  .acc-name { min-width: 0; overflow-wrap: anywhere; font-size: 10px; font-weight: 700; line-height: 1.35; }
-  .status-mark { position: relative; padding-left: 12px; color: var(--muted); font-size: 9px; font-weight: 700; line-height: 1.35; text-align: right; }
+  .acc-row { min-height: 48px; padding: 4px 2px; border-bottom: 1px solid #d8ded9; }
+  .acc-name { min-width: 0; overflow-wrap: anywhere; font-size: 12px; font-weight: 700; line-height: 1.4; }
+  .status-mark { position: relative; padding-left: 12px; color: var(--muted); font-size: 11px; font-weight: 700; line-height: 1.4; text-align: right; }
   .status-mark::before { content: "◆"; position: absolute; left: 0; top: 2px; font-size: 6px; }
   .status-mark.ok { color: var(--jade); }
   .status-mark.already,
   .status-mark.unknown { color: var(--gold); }
   .status-mark.fail { color: var(--vermilion); }
-  .acc-award { color: var(--jade); font: 9px Consolas, monospace; text-align: right; overflow-wrap: anywhere; }
-  .acc-balance { color: var(--ink); font: 9px Consolas, monospace; font-weight: 700; text-align: right; overflow-wrap: anywhere; }
+  .acc-award { color: var(--jade); font: 11px Consolas, monospace; text-align: right; overflow-wrap: anywhere; }
+  .acc-balance { color: var(--ink); font: 11px Consolas, monospace; font-weight: 700; text-align: right; overflow-wrap: anywhere; }
   .acc-msg {
     margin-top: 5px;
     padding: 7px 9px;
     color: #8f3027;
     background: var(--vermilion-soft);
     border-right: 4px solid var(--vermilion);
-    font-size: 9px;
+    font-size: 11px;
     line-height: 1.55;
     overflow-wrap: anywhere;
   }
@@ -148,7 +149,7 @@
     padding: 9px 3px 0;
     color: var(--muted);
     border-top: 1px solid var(--line);
-    font: 8px Consolas, monospace;
+    font: 9px Consolas, monospace;
   }
   .footer b { color: var(--jade); font-family: "Noto Serif SC", "SimSun", serif; font-size: 10px; }
 </style>

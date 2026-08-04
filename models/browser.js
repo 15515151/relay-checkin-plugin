@@ -130,6 +130,20 @@ function isBrowserAlive(inst) {
   return inst.connected ?? inst.isConnected?.() ?? false
 }
 
+async function browserUserAgent(browser) {
+  const configured = String(getConfig().request.userAgent || '')
+  try {
+    const version = await browser.version()
+    const runtime = String(version).match(/(?:Chrome|Chromium)\/([\d.]+)/)?.[1]
+    if (runtime && /Chrome\/[\d.]+/.test(configured)) {
+      return configured.replace(/Chrome\/[\d.]+/, `Chrome/${runtime}`)
+    }
+  } catch {
+    // 读取内核版本失败时沿用用户配置
+  }
+  return configured
+}
+
 /**
  * 解析代理地址：chromium 的 --proxy-server 不支持带账密，账密拆出来走 page.authenticate
  */
@@ -316,7 +330,10 @@ async function withPage(host, fn) {
       logger.info('[relay-checkin-plugin] 浏览器页面就绪，开始初始化')
       // 以下都是本地 CDP 调用，正常都是毫秒级；浏览器无响应时必须超时而不是静默挂死
       if (proxy?.auth) await withTimeout(page.authenticate(proxy.auth), 15000, '设置代理认证超时')
-      await withTimeout(page.setUserAgent(getConfig().request.userAgent), 15000, '设置 UA 超时（浏览器无响应）')
+      await withTimeout(page.setViewport({ width: 1365, height: 900, deviceScaleFactor: 1 }), 15000, '设置浏览器窗口超时')
+      const userAgent = await withTimeout(browserUserAgent(browser), 15000, '读取浏览器版本超时')
+      await withTimeout(page.setUserAgent(userAgent), 15000, '设置 UA 超时（浏览器无响应）')
+      await withTimeout(page.setExtraHTTPHeaders({ 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' }), 15000, '设置浏览器语言超时')
       await withTimeout(page.evaluateOnNewDocument(STEALTH_SCRIPT), 15000, '注入初始化脚本超时（浏览器无响应）')
       await installNavigationGuard(page)
       logger.info('[relay-checkin-plugin] 页面初始化完成')
@@ -443,62 +460,100 @@ export async function fetchWafCookies(account) {
 
 /**
  * 在站点页面上下文内渲染 Cloudflare Turnstile 挑战并获取 token
- * @returns {Promise<string|null>}
+ * @returns {Promise<{token: string|null, stage: string, reason: string, errorCode?: string, detail?: string}>}
  */
 async function solveTurnstile(page, siteKey, timeoutSec) {
-  return await page.evaluate(async ({ siteKey, timeoutSec }) => {
-    const deadline = Date.now() + timeoutSec * 1000
+  try {
+    return await page.evaluate(async ({ siteKey, timeoutSec }) => {
+      const deadline = Date.now() + timeoutSec * 1000
+      const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
+      const responseInput = () => document.querySelector('input[name="cf-turnstile-response"]')?.value || ''
+      const existingWidget = document.querySelector('.cf-turnstile, [data-sitekey]')
 
-    // 优先等站点自己的挑战组件出结果：保留站点原始参数（action/cData 等），
-    // 通过率高于自行 render；站点页面未渲染挑战时再回退到显式 render
-    const readExisting = () => {
-      const input = document.querySelector('input[name="cf-turnstile-response"]')
-      return input?.value || null
-    }
-    while (Date.now() < deadline) {
-      const v = readExisting()
-      if (v) return v
-      if (!document.querySelector('.cf-turnstile, [data-sitekey]')) break
-      await new Promise(r => setTimeout(r, 500))
-    }
-
-    try {
-      if (!window.turnstile) {
-        await new Promise((resolve, reject) => {
-          const s = document.createElement('script')
-          s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
-          s.onload = resolve
-          s.onerror = () => reject(new Error('Turnstile 脚本加载失败'))
-          document.head.appendChild(s)
-          setTimeout(() => reject(new Error('Turnstile 脚本加载超时')), 15000)
-        })
-      }
-      const el = document.createElement('div')
-      document.body.appendChild(el)
-      const left = Math.max(5000, deadline - Date.now())
-      return await new Promise(resolve => {
-        const timer = setTimeout(() => resolve(null), left)
-        try {
-          window.turnstile.render(el, {
-            sitekey: siteKey,
-            callback: token => {
-              clearTimeout(timer)
-              resolve(token)
-            },
-            'error-callback': () => {
-              clearTimeout(timer)
-              resolve(null)
-            }
-          })
-        } catch {
-          clearTimeout(timer)
-          resolve(null)
+      // 优先等待站点自己的组件，以保留 action / cData 等站点参数。
+      if (existingWidget) {
+        while (Date.now() < deadline) {
+          const token = responseInput()
+          if (token) return { token, stage: 'site-widget', reason: 'token' }
+          await wait(500)
         }
-      })
-    } catch {
-      return null
-    }
-  }, { siteKey, timeoutSec })
+        return { token: null, stage: 'site-widget', reason: 'timeout' }
+      }
+
+      try {
+        const waitForApi = async () => {
+          while (Date.now() < deadline) {
+            if (window.turnstile?.render) return true
+            await wait(100)
+          }
+          return false
+        }
+        if (!window.turnstile?.render) {
+          let script = document.querySelector('script[src*="challenges.cloudflare.com/turnstile/v0/api.js"]')
+          if (!script) {
+            script = document.createElement('script')
+            script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
+            script.async = true
+            script.defer = true
+            document.head.appendChild(script)
+          }
+          if (!await waitForApi()) {
+            return { token: null, stage: 'script', reason: 'load-timeout' }
+          }
+        }
+
+        const el = document.createElement('div')
+        el.style.minHeight = '70px'
+        el.style.display = 'grid'
+        el.style.placeItems = 'center'
+        document.body.appendChild(el)
+        el.scrollIntoView({ block: 'center', inline: 'center' })
+
+        const left = Math.max(1000, deadline - Date.now())
+        return await new Promise(resolve => {
+          let settled = false
+          const finish = result => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            resolve(result)
+          }
+          const timer = setTimeout(() => finish({ token: null, stage: 'explicit-widget', reason: 'timeout' }), left)
+          try {
+            window.turnstile.render(el, {
+              sitekey: siteKey,
+              theme: 'light',
+              callback: token => finish({ token, stage: 'explicit-widget', reason: 'token' }),
+              'error-callback': code => finish({
+                token: null,
+                stage: 'explicit-widget',
+                reason: 'error-callback',
+                errorCode: code == null ? '' : String(code)
+              }),
+              'expired-callback': () => finish({ token: null, stage: 'explicit-widget', reason: 'expired' }),
+              'timeout-callback': () => finish({ token: null, stage: 'explicit-widget', reason: 'challenge-timeout' })
+            })
+          } catch (err) {
+            finish({ token: null, stage: 'explicit-widget', reason: 'render-error', detail: String(err) })
+          }
+        })
+      } catch (err) {
+        return { token: null, stage: 'script', reason: 'exception', detail: String(err) }
+      }
+    }, { siteKey, timeoutSec })
+  } catch (err) {
+    return { token: null, stage: 'page', reason: 'evaluate-error', detail: String(err?.message || err) }
+  }
+}
+
+function turnstileFailureMessage(result, timeoutSec) {
+  if (result?.reason === 'error-callback') {
+    return `Turnstile 返回错误回调${result.errorCode ? `（错误码 ${result.errorCode}）` : ''}`
+  }
+  if (result?.stage === 'script') return 'Turnstile 脚本未能正常加载或初始化'
+  if (result?.reason === 'render-error' || result?.reason === 'evaluate-error') return 'Turnstile 组件执行异常'
+  if (result?.reason === 'expired') return 'Turnstile token 在提交前已过期'
+  return `Turnstile 在 ${timeoutSec} 秒内未签发 token（通常需要人工交互，或无头浏览器被拒绝）`
 }
 
 /**
@@ -517,18 +572,22 @@ export async function turnstileCheckin(account, { checkinPath, headers, siteKey 
 
     const timeoutSec = cfg.browser.turnstileTimeoutSec || 30
     // 首次失败多为脚本加载/评分抖动，重载页面再试一次
-    let token = await solveTurnstile(page, siteKey, timeoutSec)
-    if (!token) {
-      logger.info('[relay-checkin-plugin] Turnstile 首次未通过，重载页面重试')
+    let attempt = await solveTurnstile(page, siteKey, timeoutSec)
+    if (!attempt.token) {
+      logger.info(`[relay-checkin-plugin] Turnstile 首次未通过: ${turnstileFailureMessage(attempt, timeoutSec)}；重载页面重试`)
       await withTimeout(
         page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }),
         40000, '重载页面超时'
       ).catch(() => {})
-      token = await solveTurnstile(page, siteKey, timeoutSec)
+      attempt = await solveTurnstile(page, siteKey, timeoutSec)
     }
-    if (!token) return { turnstileFailed: true }
+    if (!attempt.token) {
+      const message = turnstileFailureMessage(attempt, timeoutSec)
+      logger.warn(`[relay-checkin-plugin] Turnstile 最终未通过: ${message}`)
+      return { turnstileFailed: true, message, detail: attempt }
+    }
 
-    const url = `${account.baseUrl}${checkinPath}?turnstile=${encodeURIComponent(token)}`
+    const url = `${account.baseUrl}${checkinPath}?turnstile=${encodeURIComponent(attempt.token)}`
     return await pageFetch(page, url, { method: 'POST', headers })
   })
 }
