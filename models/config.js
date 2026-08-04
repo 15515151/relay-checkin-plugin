@@ -49,6 +49,7 @@ const DEFAULT_CONFIG = {
   },
   browser: {
     enable: true,
+    executablePath: '',
     wafTimeoutSec: 60,
     turnstileTimeoutSec: 30,
     turnstileInteractive: true,

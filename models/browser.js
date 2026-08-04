@@ -103,6 +103,48 @@ async function getPuppeteer() {
   }
 }
 
+/**
+ * Turnstile 会拒绝过旧 Chromium。TRSS-Yunzai 内置 Puppeteer 可能数年未更新，
+ * 因此优先使用机器上持续更新的 Chrome/Edge，找不到时才回退 Puppeteer 自带内核。
+ */
+export function resolveBrowserExecutable(configured = '', {
+  platform = process.platform,
+  env = process.env,
+  exists = fs.existsSync
+} = {}) {
+  const explicit = String(configured || '').trim()
+  if (explicit) {
+    const resolved = path.resolve(explicit)
+    if (!exists(resolved)) throw new Error(`配置的浏览器程序不存在: ${resolved}`)
+    return resolved
+  }
+
+  const candidates = []
+  if (platform === 'win32') {
+    if (env.PROGRAMFILES) candidates.push(path.join(env.PROGRAMFILES, 'Google', 'Chrome', 'Application', 'chrome.exe'))
+    if (env['PROGRAMFILES(X86)']) {
+      candidates.push(path.join(env['PROGRAMFILES(X86)'], 'Google', 'Chrome', 'Application', 'chrome.exe'))
+      candidates.push(path.join(env['PROGRAMFILES(X86)'], 'Microsoft', 'Edge', 'Application', 'msedge.exe'))
+    }
+    if (env.LOCALAPPDATA) candidates.push(path.join(env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe'))
+    if (env.PROGRAMFILES) candidates.push(path.join(env.PROGRAMFILES, 'Microsoft', 'Edge', 'Application', 'msedge.exe'))
+  } else if (platform === 'darwin') {
+    candidates.push(
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
+    )
+  } else {
+    candidates.push(
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/google-chrome',
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+      '/snap/bin/chromium'
+    )
+  }
+  return candidates.find(candidate => exists(candidate)) || null
+}
+
 // 反自动化检测：各项独立保护，任一项失败都不影响其余初始化。
 const STEALTH_SCRIPT = `
   try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }) } catch (e) {}
@@ -245,6 +287,13 @@ async function getBrowser(pool, proxy, { interactive = false, profileKey = '' } 
         // solveTurnstile 的 page.evaluate 会一直等到 token 或配置超时；CDP 超时必须
         // 高于允许的等待上限，否则默认 120 秒的可见验证会在 90 秒被提前掐断。
         protocolTimeout: interactive ? 660000 : 150000
+      }
+      const executablePath = resolveBrowserExecutable(getConfig().browser.executablePath)
+      if (executablePath) {
+        launchOptions.executablePath = executablePath
+        logger.info(`[relay-checkin-plugin] 使用系统浏览器内核: ${executablePath}`)
+      } else {
+        logger.warn('[relay-checkin-plugin] 未找到系统 Chrome/Edge，将使用 Puppeteer 自带 Chromium；Turnstile 可能拒绝过旧内核')
       }
       if (interactive) {
         const userDataDir = interactiveProfilePath(profileKey, proxy?.server)
@@ -433,6 +482,59 @@ export async function legacyFrameOwnerBox(page, frame) {
   const top = Math.min(...ys)
   const bottom = Math.max(...ys)
   return { x: left, y: top, width: right - left, height: bottom - top }
+}
+
+/**
+ * Turnstile 的复选框位于关闭的 Shadow DOM，普通选择器无法观察其加载状态。
+ * Chrome 无障碍树会在控件真正可交互后暴露 checkbox 节点；其坐标相对 iframe，
+ * 加上 frame owner 坐标即可得到页面鼠标所需的精确位置。
+ */
+export async function turnstileCheckboxPoint(page, frame, ownerBox) {
+  const frameId = frame?._id || frame?._frameId || (typeof frame?.id === 'function' ? frame.id() : null)
+  let client = null
+  try {
+    client = typeof frame?._client === 'function' ? frame._client() : frame?._client
+  } catch {
+    client = null
+  }
+  client ||= pageCdpClient(page)
+  if (!frameId || !client || typeof client.send !== 'function') {
+    return { supported: false, point: null }
+  }
+
+  const tree = await withTimeout(
+    client.send('Accessibility.getFullAXTree', { frameId }),
+    5000,
+    '等待 Turnstile 复选框可交互超时'
+  )
+  const checkbox = tree?.nodes?.find(node => node?.role?.value === 'checkbox' && !node.ignored)
+  if (!checkbox?.backendDOMNodeId) return { supported: true, point: null }
+
+  const result = await withTimeout(
+    client.send('DOM.getBoxModel', { backendNodeId: checkbox.backendDOMNodeId }),
+    5000,
+    '读取 Turnstile 复选框坐标超时'
+  )
+  const quad = result?.model?.border || result?.model?.content
+  if (!Array.isArray(quad) || quad.length < 8 || quad.some(value => !Number.isFinite(value))) {
+    return { supported: true, point: null }
+  }
+  const xs = quad.filter((_, index) => index % 2 === 0)
+  const ys = quad.filter((_, index) => index % 2 === 1)
+  const left = Math.min(...xs)
+  const right = Math.max(...xs)
+  const top = Math.min(...ys)
+  const bottom = Math.max(...ys)
+  const width = right - left
+  return {
+    supported: true,
+    point: {
+      // AX 节点同时覆盖方框与文字，左侧约 22px 是复选框中心。
+      x: ownerBox.x + left + Math.min(22, width / 2),
+      y: ownerBox.y + top + (bottom - top) / 2
+    },
+    name: checkbox?.name?.value || ''
+  }
 }
 
 async function withPage(host, fn, { interactive = false, profileKey = host, trackResult = true } = {}) {
@@ -666,46 +768,70 @@ async function setTurnstilePanelStatus(page, text) {
 }
 
 /**
- * 可见模式先尝试一次正常鼠标点击。Cloudflare iframe 为跨域内容且可能位于封装 DOM 中，
- * 优先从 Puppeteer frame tree 取 frameElement 坐标，普通 DOM 选择器仅作兼容回退。
+ * 等到关闭 Shadow DOM 内真正出现可交互 checkbox 后再点击。仅在旧内核无法读取
+ * 无障碍树时，才对稳定显示超过 3 秒的 iframe 使用兼容坐标。
  */
 export async function autoClickTurnstileCheckbox(page, timeoutSec, shouldStop) {
   const deadline = Date.now() + Math.min(timeoutSec * 1000, 20000)
+  const fallbackSeen = new Map()
   let lastError = ''
+  let announcedWaiting = false
   while (!shouldStop() && Date.now() < deadline) {
     let iframe = null
-    let legacyFrame = null
     try {
-      let box = null
+      let target = null
       const challengeFrames = typeof page.frames === 'function'
         ? page.frames().filter(frame => /challenges\.cloudflare\.com|turnstile/i.test(String(frame.url?.() || '')))
         : []
+
       for (const frame of challengeFrames) {
-        if (!frame?.frameElement) {
-          const candidateBox = await legacyFrameOwnerBox(page, frame)
-          if (candidateBox && candidateBox.width >= 200 && candidateBox.height >= 50) {
-            legacyFrame = frame
-            box = candidateBox
-            break
-          }
-          continue
-        }
         let candidate = null
         try {
-          candidate = await withTimeout(frame.frameElement(), 5000, '从 frame tree 定位 Turnstile iframe 超时')
-          const candidateBox = await withTimeout(candidate.boundingBox(), 5000, '读取 Turnstile frame 坐标超时')
-          if (candidateBox && candidateBox.width >= 200 && candidateBox.height >= 50) {
+          let ownerBox = null
+          if (frame?.frameElement) {
+            candidate = await withTimeout(frame.frameElement(), 5000, '从 frame tree 定位 Turnstile iframe 超时')
+            ownerBox = await withTimeout(candidate.boundingBox(), 5000, '读取 Turnstile frame 坐标超时')
+          } else {
+            ownerBox = await legacyFrameOwnerBox(page, frame)
+          }
+          if (!ownerBox || ownerBox.width < 200 || ownerBox.height < 50) continue
+
+          let ready
+          try {
+            ready = await turnstileCheckboxPoint(page, frame, ownerBox)
+          } catch (err) {
+            lastError = err?.message || String(err)
+            ready = { supported: false, point: null }
+          }
+          if (ready.point) {
             iframe = candidate
-            box = candidateBox
+            target = ready.point
+            candidate = null
             break
           }
+
+          if (!ready.supported) {
+            const key = String(frame?._id || frame?._frameId || frame.url?.() || 'turnstile')
+            const firstSeen = fallbackSeen.get(key) || Date.now()
+            fallbackSeen.set(key, firstSeen)
+            if (Date.now() - firstSeen >= 3000) {
+              iframe = candidate
+              target = {
+                x: ownerBox.x + Math.min(30, ownerBox.width * 0.1),
+                y: ownerBox.y + Math.min(35, ownerBox.height * 0.5)
+              }
+              candidate = null
+              break
+            }
+          }
         } finally {
-          if (candidate && candidate !== iframe) {
+          if (candidate?.dispose) {
             await withTimeout(candidate.dispose(), 5000, '释放隐藏 Turnstile frame 句柄超时').catch(() => {})
           }
         }
       }
-      if (!iframe && !box) {
+
+      if (!target && challengeFrames.length === 0) {
         iframe = await withTimeout(
           page.$(
             '#relay-checkin-turnstile iframe[src*="challenges.cloudflare.com"], ' +
@@ -714,32 +840,34 @@ export async function autoClickTurnstileCheckbox(page, timeoutSec, shouldStop) {
           5000,
           '从页面 DOM 定位 Turnstile iframe 超时'
         )
-      }
-      if (!box) {
-        box = iframe
+        const ownerBox = iframe
           ? await withTimeout(iframe.boundingBox(), 5000, '读取 Turnstile 坐标超时')
           : null
+        if (ownerBox && ownerBox.width >= 200 && ownerBox.height >= 50) {
+          const firstSeen = fallbackSeen.get('dom-fallback') || Date.now()
+          fallbackSeen.set('dom-fallback', firstSeen)
+          if (Date.now() - firstSeen >= 3000) {
+            target = {
+              x: ownerBox.x + Math.min(30, ownerBox.width * 0.1),
+              y: ownerBox.y + Math.min(35, ownerBox.height * 0.5)
+            }
+          }
+        }
       }
-      if (box && box.width >= 200 && box.height >= 50) {
-        // iframe 刚出现尺寸时内部复选框未必已绑定事件，短暂稳定后重新取坐标。
-        await new Promise(resolve => setTimeout(resolve, 500))
-        if (shouldStop()) return false
-        box = iframe
-          ? await withTimeout(iframe.boundingBox(), 5000, '复查 Turnstile 坐标超时')
-          : legacyFrame
-            ? await legacyFrameOwnerBox(page, legacyFrame)
-            : null
+
+      if (!target && !announcedWaiting && challengeFrames.length > 0) {
+        announcedWaiting = true
+        await setTurnstilePanelStatus(page, '验证组件加载中，等待复选框可点击...')
+        logger.info('[relay-checkin-plugin] Turnstile iframe 已出现，等待内部复选框可交互')
       }
-      if (box && box.width >= 200 && box.height >= 50 && !shouldStop()) {
-        const targetX = box.x + Math.min(30, box.width * 0.1)
-        const targetY = box.y + Math.min(35, box.height * 0.5)
-        const startX = Math.max(1, targetX - 90)
-        const startY = Math.max(1, targetY + 35)
+      if (target && !shouldStop()) {
+        const startX = Math.max(1, target.x - 90)
+        const startY = Math.max(1, target.y + 35)
         await withTimeout(page.mouse.move(startX, startY), 5000, '移动鼠标到 Turnstile 前超时')
-        await withTimeout(page.mouse.move(targetX, targetY, { steps: 14 }), 5000, '移动鼠标到 Turnstile 超时')
-        await withTimeout(page.mouse.click(targetX, targetY, { delay: 120 }), 5000, '点击 Turnstile 超时')
+        await withTimeout(page.mouse.move(target.x, target.y, { steps: 14 }), 5000, '移动鼠标到 Turnstile 超时')
+        await withTimeout(page.mouse.click(target.x, target.y, { delay: 120 }), 5000, '点击 Turnstile 超时')
         await setTurnstilePanelStatus(page, '已自动点击验证，等待 Cloudflare 确认...')
-        logger.info('[relay-checkin-plugin] 已自动点击 Turnstile 复选框，等待验证结果')
+        logger.info(`[relay-checkin-plugin] 已在复选框可交互后自动点击 Turnstile（x=${target.x.toFixed(1)}, y=${target.y.toFixed(1)}）`)
         return true
       }
     } catch (err) {
@@ -762,12 +890,52 @@ export async function autoClickTurnstileCheckbox(page, timeoutSec, shouldStop) {
   return false
 }
 
+async function turnstileRetrySequence(page) {
+  return await withTimeout(
+    page.evaluate(() => Number(document.getElementById('relay-checkin-turnstile-status')?.dataset.retry || 0)),
+    5000,
+    '读取 Turnstile 重试状态超时'
+  ).catch(() => 0)
+}
+
+/**
+ * 首次点击后只监听页面端明确发出的 reset 序号；序号递增才重新等待 checkbox 并点击，
+ * 避免挑战仍在处理时重复点击。
+ */
+async function autoClickTurnstileWithRetries(page, timeoutSec, shouldStop) {
+  const deadline = Date.now() + timeoutSec * 1000
+  let retrySequence = await turnstileRetrySequence(page)
+  let clicked = await autoClickTurnstileCheckbox(
+    page,
+    Math.max(1, Math.ceil((deadline - Date.now()) / 1000)),
+    shouldStop
+  )
+
+  while (!shouldStop() && Date.now() < deadline) {
+    let nextSequence = retrySequence
+    while (!shouldStop() && Date.now() < deadline && nextSequence <= retrySequence) {
+      await new Promise(resolve => setTimeout(resolve, 350))
+      nextSequence = await turnstileRetrySequence(page)
+    }
+    if (shouldStop() || nextSequence <= retrySequence) break
+    retrySequence = nextSequence
+    logger.info(`[relay-checkin-plugin] Turnstile 组件已重置，开始第 ${retrySequence + 1} 次自动点击`)
+    const didClick = await autoClickTurnstileCheckbox(
+      page,
+      Math.max(1, Math.ceil((deadline - Date.now()) / 1000)),
+      shouldStop
+    )
+    clicked ||= didClick
+  }
+  return clicked
+}
+
 
 /**
  * 在站点页面上下文内渲染 Cloudflare Turnstile 挑战并获取 token
  * @returns {Promise<{token: string|null, stage: string, reason: string, errorCode?: string, detail?: string}>}
  */
-async function solveTurnstile(page, siteKey, timeoutSec, { interactive = false, host = '' } = {}) {
+export async function solveTurnstile(page, siteKey, timeoutSec, { interactive = false, host = '' } = {}) {
   try {
     const evaluating = page.evaluate(async ({ siteKey, timeoutSec, interactive, host }) => {
       const deadline = Date.now() + timeoutSec * 1000
@@ -839,6 +1007,7 @@ async function solveTurnstile(page, siteKey, timeoutSec, { interactive = false, 
           el.style.cssText = 'min-height:70px;display:grid;place-items:center'
           statusEl = document.createElement('p')
           statusEl.id = 'relay-checkin-turnstile-status'
+          statusEl.dataset.retry = '0'
           statusEl.textContent = '正在加载验证组件...'
           statusEl.style.cssText = 'margin:20px 0 0;color:#6a746e;font-size:13px'
           panel.append(title, site, tip, el, statusEl)
@@ -857,29 +1026,77 @@ async function solveTurnstile(page, siteKey, timeoutSec, { interactive = false, 
         const left = Math.max(1000, deadline - Date.now())
         return await new Promise(resolve => {
           let settled = false
+          let widgetId = null
+          let retryCount = 0
+          let lastErrorCode = ''
+          let retryTimer = null
+          let retryPending = false
           const finish = result => {
             if (settled) return
             settled = true
             clearTimeout(timer)
+            clearTimeout(retryTimer)
             resolve(result)
           }
-          const timer = setTimeout(() => finish({ token: null, stage: 'explicit-widget', reason: 'timeout' }), left)
+          const timer = setTimeout(() => finish(lastErrorCode
+            ? {
+                token: null,
+                stage: 'explicit-widget',
+                reason: 'error-callback',
+                errorCode: lastErrorCode,
+                retries: retryCount
+              }
+            : { token: null, stage: 'explicit-widget', reason: 'timeout' }), left)
+          const retryableError = code => /^(?:110600|110620|200500|3\d{5}|6\d{5})$/.test(code)
+          const handleError = code => {
+            const errorCode = code == null ? '' : String(code)
+            lastErrorCode = errorCode
+            if (retryPending) return
+            if (retryableError(errorCode) && retryCount < 2 && Date.now() + 2000 < deadline) {
+              retryCount++
+              retryPending = true
+              if (statusEl) {
+                statusEl.textContent = `验证暂未通过（错误码 ${errorCode}），正在重置后重试 ${retryCount}/2...`
+              }
+              retryTimer = setTimeout(() => {
+                try {
+                  window.turnstile.reset(widgetId)
+                  retryPending = false
+                  if (statusEl) {
+                    statusEl.dataset.retry = String(retryCount)
+                    statusEl.textContent = `验证已重置，等待第 ${retryCount + 1} 次自动点击...`
+                  }
+                } catch (err) {
+                  finish({
+                    token: null,
+                    stage: 'explicit-widget',
+                    reason: 'render-error',
+                    errorCode,
+                    detail: String(err)
+                  })
+                }
+              }, 1200)
+              return
+            }
+            finish({
+              token: null,
+              stage: 'explicit-widget',
+              reason: 'error-callback',
+              errorCode,
+              retries: retryCount
+            })
+          }
           try {
-            window.turnstile.render(el, {
+            widgetId = window.turnstile.render(el, {
               sitekey: siteKey,
               theme: 'light',
               callback: token => {
                 if (statusEl) statusEl.textContent = '验证通过，正在提交签到...'
                 finish({ token, stage: 'explicit-widget', reason: 'token' })
               },
-              'error-callback': code => finish({
-                token: null,
-                stage: 'explicit-widget',
-                reason: 'error-callback',
-                errorCode: code == null ? '' : String(code)
-              }),
+              'error-callback': handleError,
               'expired-callback': () => finish({ token: null, stage: 'explicit-widget', reason: 'expired' }),
-              'timeout-callback': () => finish({ token: null, stage: 'explicit-widget', reason: 'challenge-timeout' })
+              'timeout-callback': () => handleError('110620')
             })
           } catch (err) {
             finish({ token: null, stage: 'explicit-widget', reason: 'render-error', detail: String(err) })
@@ -892,7 +1109,7 @@ async function solveTurnstile(page, siteKey, timeoutSec, { interactive = false, 
 
     let stopAutoClick = false
     const autoClick = interactive
-      ? autoClickTurnstileCheckbox(page, timeoutSec, () => stopAutoClick)
+      ? autoClickTurnstileWithRetries(page, timeoutSec, () => stopAutoClick)
       : null
     try {
       return await evaluating

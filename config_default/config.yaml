@@ -42,6 +42,9 @@ security:
 # 浏览器方案（AnyRouter 过阿里云 WAF、Turnstile 站点自动降级签到）
 browser:
   enable: true
+  # 浏览器程序路径；留空时优先自动使用系统 Chrome/Edge，找不到才使用 Puppeteer 自带 Chromium
+  # Turnstile 要求浏览器保持较新，旧版 TRSS-Yunzai 建议显式填写最新版 Chrome 路径
+  executablePath: ""
   # 等待 WAF 放行的最长时间（秒）；anyrouter 的阿里云 WAF 较慢，不够时可加大
   wafTimeoutSec: 60
   # Turnstile 无头快速尝试的最长时间（秒），范围 5~120；失败后不再无效刷新

@@ -34,6 +34,7 @@ try {
   assert.equal(cfg.push.usersPerImage, 5)
   assert.deepEqual(cfg.schedule.accountDelay, [5, 15])
   assert.equal(cfg.browser.enable, true)
+  assert.equal(cfg.browser.executablePath, '')
   assert.equal(cfg.browser.wafTimeoutSec, 60)
   assert.equal(cfg.browser.turnstileTimeoutSec, 30)
   assert.equal(cfg.browser.turnstileInteractive, true)
@@ -70,7 +71,9 @@ try {
     navigateForTurnstile,
     autoClickTurnstileCheckbox,
     bypassServiceWorkerCompat,
-    legacyFrameOwnerBox
+    legacyFrameOwnerBox,
+    turnstileCheckboxPoint,
+    resolveBrowserExecutable
   } = await import('../models/browser.js')
   assert.equal(
     browserPoolKey({ proxyServer: '', profileKey: 'ioll.pp.ua' }),
@@ -96,6 +99,13 @@ try {
     interactiveProfilePath('ioll.pp.ua').startsWith(path.join(DATA, 'browser-profile')),
     '持久浏览器档案必须保存在已忽略提交的 data 目录'
   )
+  const fakeProgramFiles = path.join(ROOT, 'fake-program-files')
+  const fakeChrome = path.join(fakeProgramFiles, 'Google', 'Chrome', 'Application', 'chrome.exe')
+  assert.equal(resolveBrowserExecutable('', {
+    platform: 'win32',
+    env: { PROGRAMFILES: fakeProgramFiles },
+    exists: candidate => candidate === fakeChrome
+  }), fakeChrome, 'Windows 应自动优先使用系统 Chrome')
   assert.equal(browserHangBudgetMs(cfg.browser), 990000, '默认总预算应覆盖两阶段排队、验证与浏览器硬超时余量')
   assert.equal(
     browserHangBudgetMs({
@@ -161,6 +171,30 @@ try {
     { method: 'DOM.getFrameOwner', params: { frameId: 'turnstile-frame' } },
     { method: 'DOM.getBoxModel', params: { backendNodeId: 88 } }
   ])
+  const checkboxClient = {
+    send: async method => method === 'Accessibility.getFullAXTree'
+      ? {
+          nodes: [{
+            role: { value: 'checkbox' },
+            name: { value: '请验证您是真人' },
+            backendDOMNodeId: 22,
+            ignored: false
+          }]
+        }
+      : { model: { border: [9, 20.5, 139, 20.5, 139, 44.5, 9, 44.5] } }
+  }
+  assert.deepEqual(
+    await turnstileCheckboxPoint({}, {
+      _id: 'ready-turnstile-frame',
+      _client: () => checkboxClient
+    }, { x: 100, y: 200, width: 300, height: 65 }),
+    {
+      supported: true,
+      point: { x: 131, y: 232.5 },
+      name: '请验证您是真人'
+    },
+    '应等到无障碍树暴露真实 checkbox 后再计算点击位置'
+  )
   let stoppedPartialPage = false
   const partialNavigation = await navigateForTurnstile({
     goto: async () => { throw new Error('Navigation timeout of 30000 ms exceeded') },
@@ -209,11 +243,14 @@ try {
     boundingBox: async () => ({ x: 100, y: 200, width: 300, height: 65 }),
     dispose: async () => { iframeDisposed = true }
   }
+  const readyFrame = {
+    _id: 'ready-modern-turnstile-frame',
+    url: () => 'https://challenges.cloudflare.com/cdn-cgi/challenge-platform/turnstile',
+    frameElement: async () => frameHandle,
+    _client: () => checkboxClient
+  }
   const clicked = await autoClickTurnstileCheckbox({
-    frames: () => [{
-      url: () => 'https://challenges.cloudflare.com/cdn-cgi/challenge-platform/turnstile',
-      frameElement: async () => frameHandle
-    }],
+    frames: () => [readyFrame],
     $: async () => { throw new Error('frame tree 命中后不应再走 DOM 回退') },
     mouse: {
       move: async () => {},
@@ -222,13 +259,43 @@ try {
     evaluate: async () => {}
   }, 30, () => false)
   assert.equal(clicked, true, '标准 Turnstile iframe 应自动点击一次')
-  assert.deepEqual(clickedPoint, { x: 130, y: 232.5, options: { delay: 120 } })
+  assert.deepEqual(clickedPoint, { x: 131, y: 232.5, options: { delay: 120 } })
   assert.equal(iframeDisposed, true, '自动点击后应释放 iframe 句柄')
+
+  let readinessPolls = 0
+  let clickedBeforeReady = false
+  const notReady = await autoClickTurnstileCheckbox({
+    frames: () => [{
+      _id: 'loading-turnstile-frame',
+      url: () => 'https://challenges.cloudflare.com/loading-turnstile',
+      frameElement: async () => ({
+        boundingBox: async () => ({ x: 100, y: 200, width: 300, height: 65 }),
+        dispose: async () => {}
+      }),
+      _client: () => ({
+        send: async method => {
+          if (method === 'Accessibility.getFullAXTree') {
+            readinessPolls++
+            return { nodes: [] }
+          }
+          return { model: null }
+        }
+      })
+    }],
+    mouse: {
+      move: async () => {},
+      click: async () => { clickedBeforeReady = true }
+    },
+    evaluate: async () => {}
+  }, 30, () => readinessPolls >= 2)
+  assert.equal(notReady, false)
+  assert.equal(clickedBeforeReady, false, '只有 iframe 外框、checkbox 尚未就绪时绝不能提前点击')
 
   let legacyClickedPoint = null
   const legacyFrame = {
     _id: 'legacy-turnstile-frame',
-    url: () => 'https://challenges.cloudflare.com/cdn-cgi/challenge-platform/turnstile'
+    url: () => 'https://challenges.cloudflare.com/cdn-cgi/challenge-platform/turnstile',
+    _client: () => checkboxClient
   }
   const legacyClicked = await autoClickTurnstileCheckbox({
     frames: () => [legacyFrame],
@@ -245,7 +312,7 @@ try {
     evaluate: async () => {}
   }, 30, () => false)
   assert.equal(legacyClicked, true, '旧版 Puppeteer 也应定位并点击 Turnstile iframe')
-  assert.deepEqual(legacyClickedPoint, { x: 130, y: 232.5, options: { delay: 120 } })
+  assert.deepEqual(legacyClickedPoint, { x: 131, y: 232.5, options: { delay: 120 } })
 
   let manualCompleted = false
   let clickedAfterManual = false
