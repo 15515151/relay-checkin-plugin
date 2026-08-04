@@ -402,6 +402,17 @@ try {
   assert.equal(arInfo.balanceText, '$5.00')
   assert.equal(sentCookie, 'session=S', '无 WAF cookie 缓存时直接用 session 请求')
 
+  // WAF cookie 按 host 共享时也不能把上一个用户的 session 带给下一个用户。
+  const isolatedHeaders = anyrouter.buildHeaders(
+    { token: 'SECOND_SESSION', siteUserId: 9 },
+    'session=FIRST_SESSION; acw_sc__v2=WAF_VALUE'
+  )
+  assert.equal(
+    isolatedHeaders.Cookie,
+    'session=SECOND_SESSION; acw_sc__v2=WAF_VALUE',
+    'WAF 缓存不得污染当前账号 session'
+  )
+
   // 被 WAF 拦回（非 JSON）且浏览器方案关闭时，应明确报原因而不是静默卡住
   const savedEnable = cfgNow.browser.enable
   cfgNow.browser.enable = false

@@ -1,6 +1,6 @@
 import { getConfig } from '../models/config.js'
 import { touchEntry, upsertAccount, removeAccount, setAuto, setAccountAuto, accountLabel, persist, setPushGroup, rememberGroup } from '../models/store.js'
-import { probeAccount, normalizeBaseUrl, getAdapter, cookieTypeForHost } from '../models/adapters/index.js'
+import { probeAccount, normalizeBaseUrl, getAdapter, cookieTypeForHost, preferredBindingForHost } from '../models/adapters/index.js'
 import { checkinEntry, checkinAccount, finalizeCheckinResult, queryEntry, refreshBalances } from '../models/executor.js'
 import { withUserLock } from '../models/lock.js'
 import { renderResult, renderList, renderHelp } from '../models/render.js'
@@ -70,6 +70,17 @@ function rawText(e) {
     if (t) return t
   }
   return String(e.raw_message ?? e.msg ?? '').trim()
+}
+
+function specializedBindingHint(site) {
+  const kind = preferredBindingForHost(site?.host)
+  if (kind === 'cookie') {
+    return `检测到 ${site.host} 是 AnyRouter，请不要使用“#中转添加 令牌”。请改用：\n#中转添加cookie ${site.baseUrl}\n随后私聊发送：session值 用户ID`
+  }
+  if (kind === 'email') {
+    return `检测到 ${site.host} 是 AgentRouter，普通令牌不能用于自动签到。请改用：\n#中转添加邮箱 ${site.baseUrl}\n随后私聊发送：邮箱 AgentRouter站内密码`
+  }
+  return null
 }
 
 /**
@@ -456,6 +467,14 @@ export default class RelayCheckinApp extends plugin {
   async add() {
     const args = String(this.e.msg).trim().split(/\s+/).slice(1)
     const site = this.parseSite(args[0])
+
+    const specializedHint = specializedBindingHint(site)
+    if (specializedHint) {
+      // 完整指令可能带有敏感令牌，先撤回；仅发地址的引导指令不含敏感信息。
+      if (args.length > 1) await this.recallIfGroup()
+      await this.reply(specializedHint)
+      return true
+    }
 
     if (args.length === 1) {
       if (!site) {

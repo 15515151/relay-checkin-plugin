@@ -34,7 +34,7 @@ git clone https://github.com/Cat-bl/relay-checkin-plugin ./plugins/relay-checkin
 | 指令 | 说明 |
 |---|---|
 | `#中转帮助` | 帮助图 |
-| `#中转添加 地址` | 发起绑定，随后私聊机器人直接发送令牌（推荐群内用法） |
+| `#中转添加 地址` | 发起令牌绑定；AnyRouter/AgentRouter 会提示改用专用绑定指令 |
 | `#中转添加 地址 令牌` | 直接添加，自动识别类型（建议只在私聊使用） |
 | `#中转添加 地址 令牌 用户ID` | Veloera 站点需附加站点用户ID |
 | `#中转添加cookie 地址` | 发起 Cookie 绑定，随后私聊发送 `session值 用户ID` |
@@ -51,6 +51,8 @@ git clone https://github.com/Cat-bl/relay-checkin-plugin ./plugins/relay-checkin
 | `#中转插件更新` | 更新插件（主人） |
 
 令牌获取：站点「个人设置 → 系统访问令牌」生成。群里推荐只发 `#中转添加 地址`，机器人会提示你私聊补发令牌，绑定结果引用原消息回群提示；直接在群里发完整指令会尝试撤回消息。
+
+AnyRouter 请使用 `#中转添加cookie 地址`，随后私聊发送 `session值 用户ID`；AgentRouter 请使用 `#中转添加邮箱 地址`，随后私聊发送邮箱和 AgentRouter 站内密码。误用 `#中转添加 地址` 时插件会先提示正确方式，不会把令牌当作这两类站点的凭据。
 
 同一站点可添加多个账号：按站点用户ID区分，只有同一站点用户重复添加时才会更新凭据。
 

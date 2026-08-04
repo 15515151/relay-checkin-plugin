@@ -1049,9 +1049,10 @@ export async function navigateForTurnstile(page, targetUrl) {
 
 
 /**
- * 打开站点让阿里云 WAF 挑战通过，取出全部 cookie（含 WAF 三件套与 session）。
+ * 打开站点让阿里云 WAF 挑战通过，取出 WAF cookie。
  * 参考实现（dctx-team/Regular-inspection）同样是「浏览器只负责过 WAF 拿 cookie，
  * 之后用普通 HTTP 调接口」——页内 fetch 受 CDP 与页面导航时序影响，不如这条路稳。
+ * session 属于具体用户，不能进入按 host 共享的缓存；调用方应自行拼接当前账号的 session。
  * @returns {Promise<{cookieHeader: string}|{wafBlocked: true}>}
  */
 export async function fetchWafCookies(account) {
@@ -1083,8 +1084,12 @@ export async function fetchWafCookies(account) {
     await logPageState(page)
 
     if (!cookies.some(c => /^acw_sc__v2$/i.test(c.name))) return { wafBlocked: true }
-    const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ')
-    logger.info(`[relay-checkin-plugin] 已取得 ${cookies.length} 个 cookie，改用普通 HTTP 调用接口`)
+    // 只缓存 WAF cookie。浏览器档案/页面可能残留其他用户的 session，
+    // 把它放入按 host 共享的缓存会导致后续用户携带错 session。
+    const wafCookies = cookies.filter(c => /^(?:acw_|cdn_sec_tc$|_c_WBKFRo$)/i.test(String(c.name || '')))
+    const cookieHeader = wafCookies.map(c => `${c.name}=${c.value}`).join('; ')
+    if (!cookieHeader) return { wafBlocked: true }
+    logger.info(`[relay-checkin-plugin] 已取得 ${wafCookies.length} 个 WAF cookie，改用普通 HTTP 调用接口`)
     return { cookieHeader }
   })
 }
