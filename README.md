@@ -91,7 +91,7 @@ AnyRouter 同理（`#中转添加cookie anyrouter.top <session值> <用户ID>`�
 - `push.usersPerImage`：群合并转发每张图最多展示的用户数（默认 5）
 - `browser.enable`：浏览器方案总开关（AnyRouter 过 WAF、Turnstile 站点降级签到）
 - `browser.turnstileTimeoutSec`：Turnstile 无头快速尝试时间（默认 30 秒，范围 5~120）。未获 token 时不会再刷新后重复空等
-- `browser.turnstileInteractive`：无头尝试失败后是否打开可见浏览器接管（默认开启）。可见模式按站点和代理使用独立持久档案，Cloudflare 自动放行时无需操作，否则需在机器人运行设备上完成验证
+- `browser.turnstileInteractive`：无头尝试失败后是否打开可见浏览器接管（默认开启）。可见模式按站点和代理使用独立持久档案，并先自动点击一次验证复选框；Cloudflare 未放行时需在机器人运行设备上手动完成验证
 - `browser.turnstileInteractiveTimeoutSec`：可见浏览器等待验证的时间（默认 120 秒，范围 30~600）
 - `request.retry`：只读请求网络失败后的重试次数（默认 2）；签到 `POST` 通常只发送一次，响应不确定时改用状态接口复核。仅当站点明确返回缺少 `X-Game-*` 完整性标记时，才会补齐该标记再发一次
 - `security.allowHttp`：是否允许添加 HTTP 站点（默认 `false`）

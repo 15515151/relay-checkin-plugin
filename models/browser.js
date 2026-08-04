@@ -506,6 +506,54 @@ export async function fetchWafCookies(account) {
   })
 }
 
+async function setTurnstilePanelStatus(page, text) {
+  await page.evaluate(value => {
+    const el = document.getElementById('relay-checkin-turnstile-status')
+    if (el) el.textContent = value
+  }, text).catch(() => {})
+}
+
+/**
+ * 可见模式先尝试一次正常鼠标点击。Cloudflare iframe 为跨域内容，页面脚本无法读取，
+ * 必须从 Puppeteer 的页面坐标点击；若控件结构变化则停止自动操作并交给用户。
+ */
+async function autoClickTurnstileCheckbox(page, timeoutSec, shouldStop) {
+  const deadline = Date.now() + Math.min(timeoutSec * 1000, 20000)
+  while (!shouldStop() && Date.now() < deadline) {
+    let iframe = null
+    try {
+      iframe = await page.$(
+        '#relay-checkin-turnstile iframe[src*="challenges.cloudflare.com"], ' +
+        '#relay-checkin-turnstile iframe[src*="turnstile"]'
+      )
+      const box = await iframe?.boundingBox()
+      if (box && box.width >= 200 && box.height >= 50) {
+        const targetX = box.x + Math.min(30, box.width * 0.1)
+        const targetY = box.y + Math.min(35, box.height * 0.5)
+        const startX = Math.max(1, targetX - 90)
+        const startY = Math.max(1, targetY + 35)
+        await page.mouse.move(startX, startY)
+        await page.mouse.move(targetX, targetY, { steps: 14 })
+        await page.mouse.click(targetX, targetY, { delay: 120 })
+        await setTurnstilePanelStatus(page, '已自动点击验证，等待 Cloudflare 确认...')
+        logger.info('[relay-checkin-plugin] 已自动点击 Turnstile 复选框，等待验证结果')
+        return true
+      }
+    } catch {
+      // iframe 正在重建时继续短暂轮询
+    } finally {
+      await iframe?.dispose?.().catch(() => {})
+    }
+    await new Promise(resolve => setTimeout(resolve, 350))
+  }
+
+  if (!shouldStop()) {
+    await setTurnstilePanelStatus(page, '未能自动点击，请手动勾选上方“请验证您是真人”')
+    logger.warn('[relay-checkin-plugin] 未能自动定位 Turnstile 复选框，请在可见窗口中手动点击')
+  }
+  return false
+}
+
 
 /**
  * 在站点页面上下文内渲染 Cloudflare Turnstile 挑战并获取 token
@@ -513,7 +561,7 @@ export async function fetchWafCookies(account) {
  */
 async function solveTurnstile(page, siteKey, timeoutSec, { interactive = false, host = '' } = {}) {
   try {
-    return await page.evaluate(async ({ siteKey, timeoutSec, interactive, host }) => {
+    const evaluating = page.evaluate(async ({ siteKey, timeoutSec, interactive, host }) => {
       const deadline = Date.now() + timeoutSec * 1000
       const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
       const responseInput = () => document.querySelector('input[name="cf-turnstile-response"]')?.value || ''
@@ -576,12 +624,13 @@ async function solveTurnstile(page, siteKey, timeoutSec, { interactive = false, 
           site.textContent = host
           site.style.cssText = 'margin-bottom:18px;color:#587063;font-size:14px;word-break:break-all'
           const tip = document.createElement('p')
-          tip.textContent = `请在 ${timeoutSec} 秒内完成下方验证。验证通过后会立即提交签到并自动关闭窗口。`
+          tip.textContent = `插件会先自动尝试下方验证；若复选框仍停留，请在 ${timeoutSec} 秒内手动勾选。通过后会立即提交签到并关闭窗口。`
           tip.style.cssText = 'margin:0 0 24px;line-height:1.7;font-size:15px;color:#303b35'
           el = document.createElement('div')
           el.style.cssText = 'min-height:70px;display:grid;place-items:center'
           statusEl = document.createElement('p')
-          statusEl.textContent = '等待验证...'
+          statusEl.id = 'relay-checkin-turnstile-status'
+          statusEl.textContent = '正在加载验证组件...'
           statusEl.style.cssText = 'margin:20px 0 0;color:#6a746e;font-size:13px'
           panel.append(title, site, tip, el, statusEl)
           overlay.appendChild(panel)
@@ -631,6 +680,17 @@ async function solveTurnstile(page, siteKey, timeoutSec, { interactive = false, 
         return { token: null, stage: 'script', reason: 'exception', detail: String(err) }
       }
     }, { siteKey, timeoutSec, interactive, host })
+
+    let stopAutoClick = false
+    const autoClick = interactive
+      ? autoClickTurnstileCheckbox(page, timeoutSec, () => stopAutoClick)
+      : null
+    try {
+      return await evaluating
+    } finally {
+      stopAutoClick = true
+      if (autoClick) await autoClick.catch(() => {})
+    }
   } catch (err) {
     return { token: null, stage: 'page', reason: 'evaluate-error', detail: String(err?.message || err) }
   }
