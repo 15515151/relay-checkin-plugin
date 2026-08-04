@@ -11,6 +11,16 @@ const WAF_MSG = 'WAF 未放行（浏览器等待超时），请稍后重试'
 const wafCache = new Map()
 const WAF_TTL = 25 * 60 * 1000
 
+function cookieHeaderForAccount(account, wafCookieHeader = '') {
+  const session = String(account?.token || '').trim()
+  const wafCookies = String(wafCookieHeader || '')
+    .split(';')
+    .map(part => part.trim())
+    .filter(Boolean)
+    .filter(part => !/^session\s*=/i.test(part))
+  return [`session=${session}`, ...wafCookies].filter(Boolean).join('; ')
+}
+
 function getCached(host) {
   const c = wafCache.get(host)
   if (c && Date.now() - c.at < WAF_TTL) return c.cookieHeader
@@ -30,7 +40,9 @@ export default {
 
   buildHeaders(account, cookieHeader = null) {
     return {
-      Cookie: cookieHeader || `session=${account.token}`,
+      // WAF cookie 可按 host 缓存，但 session 必须始终来自当前账号，
+      // 防止多个用户先后绑定同一站点时串用第一个人的会话。
+      Cookie: cookieHeaderForAccount(account, cookieHeader),
       'New-Api-User': String(account.siteUserId ?? ''),
       'X-Requested-With': 'XMLHttpRequest',
       'Content-Type': 'application/json'
