@@ -3,83 +3,197 @@
 <head>
 <meta charset="utf-8">
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --ink: #19251f;
+    --muted: #748179;
+    --jade: #08795e;
+    --jade-soft: #e7f1ec;
+    --vermilion: #c83f30;
+    --vermilion-soft: #f5e6e2;
+    --gold: #b58a2d;
+    --line: #cdd5d0;
+    --paper: #f6f8f5;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; letter-spacing: 0; }
   body {
     width: 640px;
-    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
-    background: linear-gradient(160deg, #1b1f30 0%, #232a42 100%);
-    padding: 28px;
-    color: #e8eaf2;
+    position: relative;
+    overflow: hidden;
+    padding: 31px 34px 23px;
+    color: var(--ink);
+    background: var(--paper);
+    font-family: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
   }
-  .header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
+  body::before,
+  body::after {
+    content: "";
+    position: absolute;
+    width: 72px;
+    height: 72px;
+    pointer-events: none;
+    border-color: var(--jade);
+    border-style: solid;
+    opacity: 0.34;
+  }
+  body::before { left: 14px; top: 14px; border-width: 2px 0 0 2px; }
+  body::after { right: 14px; bottom: 14px; border-width: 0 2px 2px 0; }
+  .header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 72px;
+    gap: 18px;
+    align-items: start;
+    padding: 7px 5px 19px;
+    border-bottom: 1px solid var(--ink);
+  }
+  .kicker { color: var(--jade); font: 10px Consolas, monospace; }
   .title {
-    font-size: 26px; font-weight: bold;
-    background: linear-gradient(90deg, #7ab8ff, #b48cff);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    margin-top: 8px;
+    font-family: "Noto Serif SC", "Source Han Serif SC", "SimSun", serif;
+    font-size: 29px;
+    font-weight: 800;
+    line-height: 1.18;
   }
-  .time { font-size: 13px; color: #8a92ad; }
-  .section {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 14px;
-    padding: 16px 18px;
-    margin-top: 12px;
+  .subtitle { margin-top: 6px; color: var(--muted); font-size: 11px; }
+  .seal {
+    width: 62px;
+    height: 62px;
+    display: grid;
+    place-items: center;
+    align-content: center;
+    color: var(--vermilion);
+    border: 3px double var(--vermilion);
+    transform: rotate(-4deg);
+    font-family: "Noto Serif SC", "SimSun", serif;
+    font-size: 15px;
+    font-weight: 800;
+    line-height: 1.15;
   }
-  .section-title { font-size: 15px; font-weight: bold; color: #7ab8ff; margin-bottom: 10px; }
-  .cmd-row { display: flex; margin-top: 8px; }
-  .cmd {
-    font-size: 13px; color: #f5c542; white-space: nowrap;
-    background: rgba(0, 0, 0, 0.25); border-radius: 6px; padding: 4px 10px;
-    font-family: Consolas, monospace;
+  .seal small { margin-top: 3px; font: 7px Consolas, monospace; }
+  .section { margin-top: 17px; }
+  .section-head {
+    display: grid;
+    grid-template-columns: 43px minmax(0, 1fr) auto;
+    gap: 9px;
+    align-items: center;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--ink);
   }
-  .desc { font-size: 13px; color: #b9bfd3; margin-left: 12px; align-self: center; }
-  .tip { font-size: 12px; color: #8a92ad; margin-top: 10px; line-height: 1.7; }
-  .footer { margin-top: 18px; text-align: center; font-size: 12px; color: #5b6379; }
+  .section-mark { color: var(--vermilion); font-family: "Noto Serif SC", "SimSun", serif; font-size: 23px; line-height: 1; }
+  .section-title { font-family: "Noto Serif SC", "SimSun", serif; font-size: 15px; font-weight: 800; }
+  .section-plain { color: var(--muted); font-size: 9px; }
+  .command-list { border-bottom: 1px solid var(--line); }
+  .command-row {
+    display: grid;
+    grid-template-columns: 285px minmax(0, 1fr);
+    gap: 13px;
+    min-height: 39px;
+    align-items: center;
+    border-bottom: 1px solid #dbe0dc;
+  }
+  .command-row:last-child { border-bottom: 0; }
+  .command {
+    position: relative;
+    padding: 5px 0 5px 13px;
+    color: var(--jade);
+    font: 10px Consolas, "Noto Sans SC", monospace;
+    font-weight: 700;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+  .command::before { content: "◆"; position: absolute; left: 0; top: 8px; font-size: 6px; }
+  .desc { padding: 6px 0; color: #59675f; font-size: 9px; line-height: 1.5; overflow-wrap: anywhere; }
+  .notice {
+    display: grid;
+    grid-template-columns: 54px minmax(0, 1fr);
+    margin-top: 16px;
+    background: var(--vermilion-soft);
+    border-right: 4px solid var(--vermilion);
+  }
+  .notice-mark {
+    display: grid;
+    place-items: center;
+    align-content: center;
+    color: #fff;
+    background: var(--vermilion);
+    font-family: "Noto Serif SC", "SimSun", serif;
+    font-size: 14px;
+    font-weight: 800;
+    line-height: 1.2;
+  }
+  .notice-mark small { margin-top: 3px; font: 7px Consolas, monospace; }
+  .notice-text { padding: 11px 13px; color: #74362f; font-size: 9px; line-height: 1.65; }
+  .notes { border-top: 1px solid var(--line); }
+  .note-row { display: grid; grid-template-columns: 31px minmax(0, 1fr); gap: 7px; padding: 7px 2px; border-bottom: 1px solid #dbe0dc; }
+  .note-no { color: var(--gold); font: 9px Consolas, monospace; font-weight: 700; }
+  .note-text { color: #59675f; font-size: 9px; line-height: 1.55; overflow-wrap: anywhere; }
+  .note-text b { color: var(--ink); }
+  .footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-top: 19px;
+    padding: 9px 3px 0;
+    color: var(--muted);
+    border-top: 1px solid var(--line);
+    font: 8px Consolas, monospace;
+  }
+  .footer b { color: var(--jade); font-family: "Noto Serif SC", "SimSun", serif; font-size: 10px; }
 </style>
 </head>
 <body>
-  <div class="header">
-    <div class="title">中转站签到 · 帮助</div>
-    <div class="time">{{time}}</div>
-  </div>
-
-  <div class="section">
-    <div class="section-title">账号管理</div>
-    <div class="cmd-row"><span class="cmd">#中转添加 地址</span><span class="desc">发起绑定，再私聊机器人发送令牌（推荐）</span></div>
-    <div class="cmd-row"><span class="cmd">#中转添加 地址 令牌 [用户ID]</span><span class="desc">直接添加（建议只在私聊用，Veloera 需用户ID）</span></div>
-    <div class="cmd-row"><span class="cmd">#中转添加cookie 地址</span><span class="desc">发起 Cookie 绑定，再私聊发送 session值 用户ID</span></div>
-    <div class="cmd-row"><span class="cmd">#中转添加cookie 地址 session值 用户ID</span><span class="desc">直接添加（AnyRouter/AgentRouter/旧版站点）</span></div>
-    <div class="cmd-row"><span class="cmd">#中转添加邮箱 地址</span><span class="desc">AgentRouter 签到，私聊发送邮箱和站内密码</span></div>
-    <div class="cmd-row"><span class="cmd">#中转添加邮箱 地址 邮箱 密码</span><span class="desc">直接添加（仅建议私聊）</span></div>
-    <div class="cmd-row"><span class="cmd">#中转列表</span><span class="desc">查看我的账号（实时余额与今日签到状态）</span></div>
-    <div class="cmd-row"><span class="cmd">#中转删除 序号</span><span class="desc">删除自己的指定账号</span></div>
-  </div>
-
-  <div class="section">
-    <div class="section-title">签到与查询</div>
-    <div class="cmd-row"><span class="cmd">#中转签到</span><span class="desc">立即签到全部账号</span></div>
-    <div class="cmd-row"><span class="cmd">#中转签到 序号</span><span class="desc">签到指定账号</span></div>
-    <div class="cmd-row"><span class="cmd">#中转查询</span><span class="desc">查询各账号余额</span></div>
-    <div class="cmd-row"><span class="cmd">#中转定时 开/关</span><span class="desc">每日自动签到总开关</span></div>
-    <div class="cmd-row"><span class="cmd">#中转定时 开/关 序号</span><span class="desc">单个账号的定时开关（默认开）</span></div>
-    <div class="cmd-row"><span class="cmd">#中转开启/关闭群推送</span><span class="desc">本群是否接收定时推送结果（群管理，默认关）</span></div>
-  </div>
-
-  <div class="section">
-    <div class="section-title">说明</div>
-    <div class="tip">
-      · 群里推荐只发「#中转添加 地址」，令牌/session 私聊补发，绑定结果会引用原消息回到群里提示<br>
-      · 机器人开启私聊禁用（disablePrivate）时：主人在 disableAdopt 加入 中转 后，私聊改发「中转绑定 凭据」<br>
-      · 令牌为站点「个人设置 → 系统访问令牌」生成的 token；群里发含令牌的完整指令会尝试撤回<br>
-      · 同一站点可添加多个账号（按站点用户ID区分），数据按 QQ 隔离，删除/定时只影响自己<br>
-      · 定时结果会推送到所有已开启推送的群（群管理发 #中转开启群推送），内容包含全部定时签到用户<br>
-      · AnyRouter / AgentRouter（含 *.air-outer.com）用 Cookie 方式添加：F12 复制 session 值与用户ID<br>
-      · AgentRouter 自动 $25 签到需先重置站内密码，再用「#中转添加邮箱」绑定；不是 GitHub/LinuxDO 密码<br>
-      · 支持 new-api / Veloera 及同源魔改站；Turnstile 人机验证站点自动切换浏览器方案签到<br>
-      · AnyRouter 有阿里云 WAF，签到走无头浏览器，耗时略长属正常现象
+  <header class="header">
+    <div>
+      <div class="kicker">RELAY CHECK-IN · COMMAND MANUAL</div>
+      <h1 class="title">中转站签到手册</h1>
+      <div class="subtitle">账号绑定、签到查询与定时推送指令 · {{time}}</div>
     </div>
+    <div class="seal">指令<br>录册<small>HELP</small></div>
+  </header>
+
+  <section class="section">
+    <div class="section-head"><span class="section-mark">壹</span><span class="section-title">账号管理</span><span class="section-plain">章节一 / 1</span></div>
+    <div class="command-list">
+      <div class="command-row"><span class="command">#中转添加 地址</span><span class="desc">发起绑定，再私聊机器人发送令牌（推荐）</span></div>
+      <div class="command-row"><span class="command">#中转添加 地址 令牌 [用户ID]</span><span class="desc">直接添加；建议仅私聊使用，Veloera 需要用户ID</span></div>
+      <div class="command-row"><span class="command">#中转添加cookie 地址</span><span class="desc">发起 Cookie 绑定，再私聊发送 session值 用户ID</span></div>
+      <div class="command-row"><span class="command">#中转添加cookie 地址 session值 用户ID</span><span class="desc">Cookie 方式直接添加（AnyRouter / 旧版站点）</span></div>
+      <div class="command-row"><span class="command">#中转添加邮箱 地址</span><span class="desc">AgentRouter 邮箱登录签到，再私聊发送邮箱和站内密码</span></div>
+      <div class="command-row"><span class="command">#中转添加邮箱 地址 邮箱 密码</span><span class="desc">AgentRouter 直接添加，仅建议私聊使用</span></div>
+      <div class="command-row"><span class="command">#中转列表</span><span class="desc">查看余额、今日签到状态与定时开关</span></div>
+      <div class="command-row"><span class="command">#中转删除 序号</span><span class="desc">删除自己的指定账号</span></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head"><span class="section-mark">贰</span><span class="section-title">签到与推送</span><span class="section-plain">章节二 / 2</span></div>
+    <div class="command-list">
+      <div class="command-row"><span class="command">#中转签到</span><span class="desc">立即签到全部账号</span></div>
+      <div class="command-row"><span class="command">#中转签到 序号</span><span class="desc">立即签到指定账号</span></div>
+      <div class="command-row"><span class="command">#中转查询</span><span class="desc">查询全部账号余额</span></div>
+      <div class="command-row"><span class="command">#中转定时 开/关</span><span class="desc">每日自动签到总开关</span></div>
+      <div class="command-row"><span class="command">#中转定时 开/关 序号</span><span class="desc">单个账号的定时开关（默认开启）</span></div>
+      <div class="command-row"><span class="command">#中转开启/关闭群推送</span><span class="desc">把当前群加入或移出固定推送目标（群管理）</span></div>
+    </div>
+  </section>
+
+  <div class="notice">
+    <div class="notice-mark">凭据<br>安全<small>IMPORTANT</small></div>
+    <div class="notice-text">令牌、Session 和站内密码不要发送到群里。AgentRouter 自动领取每日 $25，需要先重置站内密码，再使用“邮箱 + AgentRouter 站内密码”绑定；这里不是 GitHub 或 LinuxDO 密码。</div>
   </div>
 
-  <div class="footer">relay-checkin-plugin · TRSS-Yunzai</div>
+  <section class="section">
+    <div class="section-head"><span class="section-mark">叁</span><span class="section-title">使用说明</span><span class="section-plain">章节三 / 3</span></div>
+    <div class="notes">
+      <div class="note-row"><span class="note-no">01</span><span class="note-text">群里推荐只发“#中转添加 地址”，敏感凭据私聊补发，绑定结果会回到原群提示。</span></div>
+      <div class="note-row"><span class="note-no">02</span><span class="note-text">机器人开启 disablePrivate 时，主人需在 disableAdopt 中加入“中转”，私聊改发“中转绑定 凭据”。</span></div>
+      <div class="note-row"><span class="note-no">03</span><span class="note-text">同一站点可添加多个账号，数据按 QQ 隔离，删除和定时操作只影响自己。</span></div>
+      <div class="note-row"><span class="note-no">04</span><span class="note-text">定时结果会推送到 <b>push_groups.json 中配置的每一个群</b>，内容包含全部定时签到用户。</span></div>
+      <div class="note-row"><span class="note-no">05</span><span class="note-text">AgentRouter Cookie 账号只能查询余额；自动签到请使用“#中转添加邮箱”。</span></div>
+      <div class="note-row"><span class="note-no">06</span><span class="note-text">支持 new-api、Veloera 及同源魔改站；Turnstile 站点会自动尝试浏览器方案。</span></div>
+      <div class="note-row"><span class="note-no">07</span><span class="note-text">AnyRouter 有阿里云 WAF，浏览器签到耗时较长属于正常现象。</span></div>
+    </div>
+  </section>
+
+  <footer class="footer"><b>中转站签到手册</b><span>relay-checkin-plugin · TRSS-Yunzai</span></footer>
 </body>
 </html>

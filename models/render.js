@@ -13,6 +13,48 @@ function now() {
 
 let renderSeq = 0
 
+const COMMON_CN_DIGITS = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九']
+const FINANCIAL_CN_DIGITS = ['零', '壹', '贰', '叁', '肆', '伍', '陆', '柒', '捌', '玖']
+
+function chineseInteger(value, digits) {
+  const n = Math.max(0, Math.floor(Number(value) || 0))
+  if (n < 10) return digits[n]
+  if (n < 20) return `十${n % 10 ? digits[n % 10] : ''}`
+  if (n < 100) return `${digits[Math.floor(n / 10)]}十${n % 10 ? digits[n % 10] : ''}`
+  return String(n)
+}
+
+function resultSeal(title) {
+  if (/查询/.test(title)) return { top: '余额', bottom: '已录' }
+  if (/账号/.test(title)) return { top: '账号', bottom: '已录' }
+  return { top: '签到', bottom: '已毕' }
+}
+
+function resultViewData(users) {
+  const summary = { total: 0, ok: 0, notice: 0, fail: 0 }
+  const decoratedUsers = users.map((user, index) => {
+    for (const account of user.accounts) {
+      summary.total++
+      if (account.status === 'ok') summary.ok++
+      else if (account.status === 'already' || account.status === 'unknown') summary.notice++
+      else summary.fail++
+    }
+    const sectionIndex = index + 1
+    return {
+      ...user,
+      sectionMark: chineseInteger(sectionIndex, FINANCIAL_CN_DIGITS),
+      sectionText: `用户${chineseInteger(sectionIndex, COMMON_CN_DIGITS)}`
+    }
+  })
+  const summaryItems = [
+    { label: '结果条目', tone: '', mark: chineseInteger(summary.total, FINANCIAL_CN_DIGITS), value: summary.total },
+    { label: '执行成功', tone: 'ok', mark: chineseInteger(summary.ok, FINANCIAL_CN_DIGITS), value: summary.ok },
+    { label: '已签 / 待核', tone: 'notice', mark: chineseInteger(summary.notice, FINANCIAL_CN_DIGITS), value: summary.notice },
+    { label: '执行异常', tone: 'fail', mark: chineseInteger(summary.fail, FINANCIAL_CN_DIGITS), value: summary.fail }
+  ]
+  return { users: decoratedUsers, summaryItems }
+}
+
 /**
  * 通用模板渲染，返回可直接发送的图片消息段（失败返回 false）
  * saveId 轮转编号，避免定时任务与手动指令并发渲染时写同名文件
@@ -32,7 +74,14 @@ async function render(tplName, data) {
  * users: [{ nickname, userId, accounts: [{ name, status, statusText, award, balance, msg }] }]
  */
 export async function renderResult({ title, subtitle = '', users }) {
-  return await render('result', { title, subtitle, time: now(), users })
+  const view = resultViewData(users)
+  return await render('result', {
+    title,
+    subtitle,
+    time: now(),
+    seal: resultSeal(title),
+    ...view
+  })
 }
 
 /**
@@ -64,6 +113,8 @@ export async function renderList({ nickname, userId, autoCheckin, accounts }) {
     const autoOn = acc.auto !== false
     return {
       index: i + 1,
+      indexMark: chineseInteger(i + 1, FINANCIAL_CN_DIGITS),
+      indexText: `账号${chineseInteger(i + 1, COMMON_CN_DIGITS)}`,
       name: accountLabel(acc),
       baseUrl: acc.baseUrl,
       typeLabel: { newapi: 'new-api', veloera: 'Veloera', generic: 'Cookie', agentrouter: 'AgentRouter', anyrouter: 'AnyRouter' }[acc.type] || acc.type,
@@ -81,6 +132,8 @@ export async function renderList({ nickname, userId, autoCheckin, accounts }) {
     nickname,
     userId,
     autoText: autoCheckin ? '已开启' : '已关闭',
+    accountCount: rows.length,
+    accountCountMark: chineseInteger(rows.length, FINANCIAL_CN_DIGITS),
     time: now(),
     accounts: rows
   })

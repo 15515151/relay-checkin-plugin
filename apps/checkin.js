@@ -14,6 +14,7 @@ import { runScheduledCheckin } from '../models/scheduler.js'
  * promptMsgId 为群内「请私聊发送凭据」提示消息，绑定终态时立即撤回，否则到时撤回
  */
 const pendingBinds = new Map()
+const BIND_SCOPE_NOTICE = '授权说明：凭据将在机器人本地保存，仅用于账号验证、余额查询和自动签到；不会修改资料、消耗额度或执行其他账号操作。请仅绑定可信站点并自行承担站点风险。'
 
 function clearPending(userId) {
   const pending = pendingBinds.get(String(userId))
@@ -435,14 +436,17 @@ export default class RelayCheckinApp extends plugin {
     const mins = Math.max(1, Math.round(timeoutSec / 60))
     if (this.e.isGroup) {
       // 提示消息由插件自己管理撤回：绑定出结果立即撤，否则到 groupRecallSec 兜底撤
-      const res = await this.reply(`已记录站点 ${pending.host}，请在 ${mins} 分钟内私聊我直接发送：${sendAs}。敏感信息不要发在群里，结果会回到本群提示`, true)
+      const res = await this.reply(
+        `已记录站点 ${pending.host}，请在 ${mins} 分钟内私聊我直接发送：${sendAs}。敏感信息不要发在群里，结果会回到本群提示。\n${BIND_SCOPE_NOTICE}`,
+        true
+      )
       pending.promptMsgId = res?.message_id ?? null
       const sec = bindRecallSec()
       if (sec > 0 && pending.promptMsgId) {
         pending.promptTimer = setTimeout(() => recallBindPrompt(pending), sec * 1000)
       }
     } else {
-      await this.reply(`已记录站点 ${pending.host}，请在 ${mins} 分钟内直接发送：${sendAs}`)
+      await this.reply(`已记录站点 ${pending.host}，请在 ${mins} 分钟内直接发送：${sendAs}\n${BIND_SCOPE_NOTICE}`)
     }
   }
 

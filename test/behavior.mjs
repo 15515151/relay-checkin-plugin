@@ -376,32 +376,48 @@ try {
   const art = (await import('art-template')).default
   const tplDir = path.join(ROOT, 'resources', 'template')
   const users = [
-    { nickname: '用户A', userId: '111', accounts: [
+    { nickname: '用户A', userId: '111', sectionMark: '壹', sectionText: '用户一', accounts: [
       { name: 'a.com', status: 'ok', statusText: '签到成功', award: '+$0.50', balance: '$12.30', msg: '' },
       { name: 'b.com', status: 'fail', statusText: '签到失败', award: '', balance: '-', msg: '凭据无效或已过期 (HTTP 401)' }
     ] },
-    { nickname: '用户B', userId: '222', accounts: [
+    { nickname: '用户B', userId: '222', sectionMark: '贰', sectionText: '用户二', accounts: [
       { name: 'agentrouter.org', status: 'unknown', statusText: 'Session 有效·未重登', award: '', balance: '$25.00', msg: '签到未确认' }
     ] }
   ]
-  let html = art(path.join(tplDir, 'result.html'), { title: '中转站定时签到', subtitle: '第 1/2 页', time: '2026-08-03 08:10', users })
+  const summaryItems = [
+    { label: '结果条目', tone: '', mark: '叁', value: 3 },
+    { label: '执行成功', tone: 'ok', mark: '壹', value: 1 },
+    { label: '已签 / 待核', tone: 'notice', mark: '壹', value: 1 },
+    { label: '执行异常', tone: 'fail', mark: '壹', value: 1 }
+  ]
+  let html = art(path.join(tplDir, 'result.html'), {
+    title: '中转站定时签到', subtitle: '第 1/2 页', time: '2026-08-03 08:10',
+    seal: { top: '签到', bottom: '已毕' }, summaryItems, users
+  })
   assert.ok(html.includes('用户A') && html.includes('Session 有效·未重登') && html.includes('第 1/2 页'))
-  assert.ok(html.includes('badge ok') && html.includes('badge fail'))
+  assert.ok(html.includes('status-mark ok') && html.includes('status-mark fail'))
+  assert.ok(html.includes('叁') && html.includes('3 条') && html.includes('用户一'), '大写数字必须同时带普通数字/序号注释')
   assert.ok(html.includes('凭据无效'))
 
-  html = art(path.join(tplDir, 'result.html'), { title: '中转站签到', subtitle: '', time: 'T', users: [users[0]] })
+  html = art(path.join(tplDir, 'result.html'), {
+    title: '中转站签到', subtitle: '', time: 'T', seal: { top: '签到', bottom: '已毕' },
+    summaryItems, users: [users[0]]
+  })
   assert.ok(!html.includes('subtitle">'), '无副标题时不应输出 subtitle 节点')
 
   html = art(path.join(tplDir, 'list.html'), {
-    nickname: 'N', userId: '111', autoText: '已开启', time: 'T',
+    nickname: 'N', userId: '111', autoText: '已开启', accountCount: 1, accountCountMark: '壹', time: 'T',
     accounts: [{
-      index: 1, name: 'a.com (u1)', baseUrl: 'https://a.com', typeLabel: 'new-api', tokenMasked: 'abcd****wxyz',
+      index: 1, indexMark: '壹', indexText: '账号一', name: 'a.com (u1)', baseUrl: 'https://a.com', typeLabel: 'new-api', tokenMasked: 'abcd****wxyz',
       balance: '$12.30', checkinText: '今日已签', checkinClass: 'on', autoText: '定时开', autoClass: 'on'
     }]
   })
   assert.ok(html.includes('a.com (u1)') && html.includes('abcd****wxyz') && !html.includes('暂无账号'))
   assert.ok(html.includes('余额 $12.30') && html.includes('今日已签') && html.includes('定时开'), '列表应展示余额与签到/定时状态')
-  html = art(path.join(tplDir, 'list.html'), { nickname: 'N', userId: '1', autoText: '已开启', time: 'T', accounts: [] })
+  assert.ok(html.includes('账号一') && html.includes('· 1'), '账号大写序号必须同时带普通序号注释')
+  html = art(path.join(tplDir, 'list.html'), {
+    nickname: 'N', userId: '1', autoText: '已开启', accountCount: 0, accountCountMark: '零', time: 'T', accounts: []
+  })
   assert.ok(html.includes('暂无账号'))
 
   html = art(path.join(tplDir, 'help.html'), { time: 'T' })
