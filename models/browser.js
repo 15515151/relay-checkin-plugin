@@ -362,6 +362,79 @@ async function installNavigationGuard(page) {
   })
 }
 
+function pageCdpClient(page) {
+  try {
+    return typeof page?._client === 'function' ? page._client() : page?._client
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Puppeteer 新版提供 Page.setBypassServiceWorker，TRSS-Yunzai 内置的旧版通常只有
+ * Page._client()。两者最终调用同一个 CDP 命令；都不可用时允许继续，Service Worker
+ * 绕过只用于避免持久档案命中旧缓存，不应阻断浏览器签到。
+ */
+export async function bypassServiceWorkerCompat(page) {
+  if (typeof page?.setBypassServiceWorker === 'function') {
+    try {
+      await page.setBypassServiceWorker(true)
+      return 'page-api'
+    } catch (err) {
+      logger.warn(`[relay-checkin-plugin] Puppeteer Service Worker API 调用失败，尝试旧版兼容方式: ${err?.message || err}`)
+    }
+  }
+
+  try {
+    const client = pageCdpClient(page)
+    if (client && typeof client.send === 'function') {
+      await client.send('Network.setBypassServiceWorker', { bypass: true })
+      return 'cdp'
+    }
+  } catch (err) {
+    logger.warn(`[relay-checkin-plugin] 旧版 Puppeteer 无法禁用 Service Worker，继续浏览器签到: ${err?.message || err}`)
+  }
+
+  return 'unsupported'
+}
+
+/**
+ * Puppeteer 20 之前没有 Frame.frameElement()。旧版仍暴露 frame id 与页面 CDP
+ * 客户端，可由 DOM.getFrameOwner 取得跨域 iframe 的真实屏幕坐标。
+ */
+export async function legacyFrameOwnerBox(page, frame) {
+  const frameId = frame?._id || frame?._frameId || (typeof frame?.id === 'function' ? frame.id() : null)
+  const client = pageCdpClient(page)
+  if (!frameId || !client || typeof client.send !== 'function') return null
+
+  const owner = await withTimeout(
+    client.send('DOM.getFrameOwner', { frameId }),
+    5000,
+    '旧版 Puppeteer 定位 Turnstile frame 超时'
+  )
+  const node = owner?.backendNodeId
+    ? { backendNodeId: owner.backendNodeId }
+    : owner?.nodeId
+      ? { nodeId: owner.nodeId }
+      : null
+  if (!node) return null
+
+  const result = await withTimeout(
+    client.send('DOM.getBoxModel', node),
+    5000,
+    '旧版 Puppeteer 读取 Turnstile 坐标超时'
+  )
+  const quad = result?.model?.border || result?.model?.content
+  if (!Array.isArray(quad) || quad.length < 8 || quad.some(value => !Number.isFinite(value))) return null
+  const xs = quad.filter((_, index) => index % 2 === 0)
+  const ys = quad.filter((_, index) => index % 2 === 1)
+  const left = Math.min(...xs)
+  const right = Math.max(...xs)
+  const top = Math.min(...ys)
+  const bottom = Math.max(...ys)
+  return { x: left, y: top, width: right - left, height: bottom - top }
+}
+
 async function withPage(host, fn, { interactive = false, profileKey = host, trackResult = true } = {}) {
   checkBreaker(host)
   await acquirePageSlot()
@@ -391,7 +464,19 @@ async function withPage(host, fn, { interactive = false, profileKey = host, trac
       const userAgent = await withTimeout(browserUserAgent(browser), 15000, '读取浏览器版本超时')
       await withTimeout(page.setUserAgent(userAgent), 15000, '设置 UA 超时（浏览器无响应）')
       await withTimeout(page.setExtraHTTPHeaders({ 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' }), 15000, '设置浏览器语言超时')
-      await withTimeout(page.setBypassServiceWorker(true), 15000, '禁用页面 Service Worker 超时')
+      const serviceWorkerMode = await withTimeout(
+        bypassServiceWorkerCompat(page),
+        15000,
+        '禁用页面 Service Worker 超时'
+      ).catch(err => {
+        logger.warn(`[relay-checkin-plugin] 禁用页面 Service Worker 超时，继续浏览器签到: ${err?.message || err}`)
+        return 'unsupported'
+      })
+      if (serviceWorkerMode === 'cdp') {
+        logger.info('[relay-checkin-plugin] 已使用旧版 Puppeteer 兼容方式禁用页面 Service Worker')
+      } else if (serviceWorkerMode === 'unsupported') {
+        logger.warn('[relay-checkin-plugin] 当前 Puppeteer 不支持禁用页面 Service Worker，已跳过该可选优化')
+      }
       await withTimeout(page.evaluateOnNewDocument(STEALTH_SCRIPT), 15000, '注入初始化脚本超时（浏览器无响应）')
       await installNavigationGuard(page)
       if (interactive) await withTimeout(page.bringToFront(), 15000, '显示浏览器窗口超时')
@@ -589,13 +674,22 @@ export async function autoClickTurnstileCheckbox(page, timeoutSec, shouldStop) {
   let lastError = ''
   while (!shouldStop() && Date.now() < deadline) {
     let iframe = null
+    let legacyFrame = null
     try {
       let box = null
       const challengeFrames = typeof page.frames === 'function'
         ? page.frames().filter(frame => /challenges\.cloudflare\.com|turnstile/i.test(String(frame.url?.() || '')))
         : []
       for (const frame of challengeFrames) {
-        if (!frame?.frameElement) continue
+        if (!frame?.frameElement) {
+          const candidateBox = await legacyFrameOwnerBox(page, frame)
+          if (candidateBox && candidateBox.width >= 200 && candidateBox.height >= 50) {
+            legacyFrame = frame
+            box = candidateBox
+            break
+          }
+          continue
+        }
         let candidate = null
         try {
           candidate = await withTimeout(frame.frameElement(), 5000, '从 frame tree 定位 Turnstile iframe 超时')
@@ -611,7 +705,7 @@ export async function autoClickTurnstileCheckbox(page, timeoutSec, shouldStop) {
           }
         }
       }
-      if (!iframe) {
+      if (!iframe && !box) {
         iframe = await withTimeout(
           page.$(
             '#relay-checkin-turnstile iframe[src*="challenges.cloudflare.com"], ' +
@@ -632,7 +726,9 @@ export async function autoClickTurnstileCheckbox(page, timeoutSec, shouldStop) {
         if (shouldStop()) return false
         box = iframe
           ? await withTimeout(iframe.boundingBox(), 5000, '复查 Turnstile 坐标超时')
-          : null
+          : legacyFrame
+            ? await legacyFrameOwnerBox(page, legacyFrame)
+            : null
       }
       if (box && box.width >= 200 && box.height >= 50 && !shouldStop()) {
         const targetX = box.x + Math.min(30, box.width * 0.1)

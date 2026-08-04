@@ -68,7 +68,9 @@ try {
     interactiveProfilePath,
     browserHangBudgetMs,
     navigateForTurnstile,
-    autoClickTurnstileCheckbox
+    autoClickTurnstileCheckbox,
+    bypassServiceWorkerCompat,
+    legacyFrameOwnerBox
   } = await import('../models/browser.js')
   assert.equal(
     browserPoolKey({ proxyServer: '', profileKey: 'ioll.pp.ua' }),
@@ -115,6 +117,50 @@ try {
     450000,
     '关闭可见接管时不应计入第二次排队和交互等待'
   )
+  let publicBypass = null
+  assert.equal(
+    await bypassServiceWorkerCompat({
+      setBypassServiceWorker: async value => { publicBypass = value }
+    }),
+    'page-api',
+    '新版 Puppeteer 应使用公开的 Service Worker API'
+  )
+  assert.equal(publicBypass, true)
+
+  let legacyBypass = null
+  assert.equal(
+    await bypassServiceWorkerCompat({
+      _client: () => ({
+        send: async (method, params) => { legacyBypass = { method, params } }
+      })
+    }),
+    'cdp',
+    '旧版 Puppeteer 应通过 CDP 兼容禁用 Service Worker'
+  )
+  assert.deepEqual(legacyBypass, {
+    method: 'Network.setBypassServiceWorker',
+    params: { bypass: true }
+  })
+  assert.equal(
+    await bypassServiceWorkerCompat({}),
+    'unsupported',
+    '完全不支持时应跳过可选优化而不是阻断签到'
+  )
+  const legacyCdpCalls = []
+  const legacyBox = await legacyFrameOwnerBox({
+    _client: {
+      send: async (method, params) => {
+        legacyCdpCalls.push({ method, params })
+        if (method === 'DOM.getFrameOwner') return { backendNodeId: 88 }
+        return { model: { border: [100, 200, 400, 200, 400, 265, 100, 265] } }
+      }
+    }
+  }, { _id: 'turnstile-frame' })
+  assert.deepEqual(legacyBox, { x: 100, y: 200, width: 300, height: 65 })
+  assert.deepEqual(legacyCdpCalls, [
+    { method: 'DOM.getFrameOwner', params: { frameId: 'turnstile-frame' } },
+    { method: 'DOM.getBoxModel', params: { backendNodeId: 88 } }
+  ])
   let stoppedPartialPage = false
   const partialNavigation = await navigateForTurnstile({
     goto: async () => { throw new Error('Navigation timeout of 30000 ms exceeded') },
@@ -178,6 +224,28 @@ try {
   assert.equal(clicked, true, '标准 Turnstile iframe 应自动点击一次')
   assert.deepEqual(clickedPoint, { x: 130, y: 232.5, options: { delay: 120 } })
   assert.equal(iframeDisposed, true, '自动点击后应释放 iframe 句柄')
+
+  let legacyClickedPoint = null
+  const legacyFrame = {
+    _id: 'legacy-turnstile-frame',
+    url: () => 'https://challenges.cloudflare.com/cdn-cgi/challenge-platform/turnstile'
+  }
+  const legacyClicked = await autoClickTurnstileCheckbox({
+    frames: () => [legacyFrame],
+    _client: () => ({
+      send: async method => method === 'DOM.getFrameOwner'
+        ? { backendNodeId: 99 }
+        : { model: { border: [100, 200, 400, 200, 400, 265, 100, 265] } }
+    }),
+    $: async () => { throw new Error('旧版 frame owner 命中后不应再走 DOM 回退') },
+    mouse: {
+      move: async () => {},
+      click: async (x, y, options) => { legacyClickedPoint = { x, y, options } }
+    },
+    evaluate: async () => {}
+  }, 30, () => false)
+  assert.equal(legacyClicked, true, '旧版 Puppeteer 也应定位并点击 Turnstile iframe')
+  assert.deepEqual(legacyClickedPoint, { x: 130, y: 232.5, options: { delay: 120 } })
 
   let manualCompleted = false
   let clickedAfterManual = false
