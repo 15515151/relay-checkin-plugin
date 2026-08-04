@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import { DATA_PATH, getConfig } from './config.js'
 import { proxyForHost } from './adapters/common.js'
 import { assertSafeRequestUrl } from './url-security.js'
@@ -109,10 +110,47 @@ async function getPuppeteer() {
  * Turnstile 会拒绝过旧 Chromium。TRSS-Yunzai 内置 Puppeteer 可能数年未更新，
  * 因此优先使用机器上持续更新的 Chrome/Edge，找不到时才回退 Puppeteer 自带内核。
  */
+export function browserExecutableVersion(executablePath, {
+  platform = process.platform,
+  spawn = spawnSync
+} = {}) {
+  try {
+    let result
+    if (platform === 'win32') {
+      const escapedPath = String(executablePath).replaceAll("'", "''")
+      const command = `(Get-Item -LiteralPath '${escapedPath}').VersionInfo.ProductVersion`
+      const encodedCommand = Buffer.from(command, 'utf16le').toString('base64')
+      result = spawn('powershell.exe', [
+          '-NoProfile',
+          '-NonInteractive',
+          '-EncodedCommand',
+          encodedCommand
+        ], { encoding: 'utf8', windowsHide: true, timeout: 5000 })
+    } else {
+      result = spawn(executablePath, ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 5000 })
+    }
+    const output = `${result?.stdout || ''}\n${result?.stderr || ''}`
+    return output.match(/\b(\d+(?:\.\d+){1,3})\b/)?.[1] || ''
+  } catch {
+    return ''
+  }
+}
+
+function compareBrowserVersions(a, b) {
+  const left = String(a || '').split('.').map(Number)
+  const right = String(b || '').split('.').map(Number)
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    const diff = (left[i] || 0) - (right[i] || 0)
+    if (diff) return diff
+  }
+  return 0
+}
+
 export function resolveBrowserExecutable(configured = '', {
   platform = process.platform,
   env = process.env,
-  exists = fs.existsSync
+  exists = fs.existsSync,
+  versionOf = executablePath => browserExecutableVersion(executablePath, { platform })
 } = {}) {
   const explicit = String(configured || '').trim()
   if (explicit) {
@@ -144,7 +182,12 @@ export function resolveBrowserExecutable(configured = '', {
       '/snap/bin/chromium'
     )
   }
-  return candidates.find(candidate => exists(candidate)) || null
+  const installed = [...new Set(candidates)].filter(candidate => exists(candidate))
+  if (installed.length <= 1) return installed[0] || null
+  return installed
+    .map((executablePath, index) => ({ executablePath, version: versionOf(executablePath), index }))
+    .sort((a, b) => compareBrowserVersions(b.version, a.version) || a.index - b.index)[0]
+    ?.executablePath || null
 }
 
 // 反自动化检测：各项独立保护，任一项失败都不影响其余初始化。
@@ -1152,6 +1195,9 @@ export async function solveTurnstile(page, siteKey, timeoutSec, { interactive = 
 
 function turnstileFailureMessage(result, timeoutSec, interactive = false) {
   if (result?.reason === 'error-callback') {
+    if (/^[36]\d{5}$/.test(result.errorCode || '')) {
+      return `Turnstile 返回错误回调（错误码 ${result.errorCode}：Cloudflare 检测到浏览器或网络风险，请更新系统 Chrome/Edge 或更换网络）`
+    }
     return `Turnstile 返回错误回调${result.errorCode ? `（错误码 ${result.errorCode}）` : ''}`
   }
   if (result?.stage === 'script') return 'Turnstile 脚本未能正常加载或初始化'

@@ -75,7 +75,8 @@ try {
     turnstileCheckboxPoint,
     resolveBrowserExecutable,
     newPageSafe,
-    turnstileBrowserMode
+    turnstileBrowserMode,
+    browserExecutableVersion
   } = await import('../models/browser.js')
   assert.equal(
     browserPoolKey({ proxyServer: '', profileKey: 'ioll.pp.ua' }),
@@ -108,11 +109,21 @@ try {
   )
   const fakeProgramFiles = path.join(ROOT, 'fake-program-files')
   const fakeChrome = path.join(fakeProgramFiles, 'Google', 'Chrome', 'Application', 'chrome.exe')
+  const fakeEdge = path.join(fakeProgramFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe')
   assert.equal(resolveBrowserExecutable('', {
     platform: 'win32',
     env: { PROGRAMFILES: fakeProgramFiles },
-    exists: candidate => candidate === fakeChrome
-  }), fakeChrome, 'Windows 应自动优先使用系统 Chrome')
+    exists: candidate => candidate === fakeChrome || candidate === fakeEdge,
+    versionOf: candidate => candidate === fakeEdge ? '151.0.1.0' : '129.0.1.0'
+  }), fakeEdge, 'Windows 应自动选择版本最高的系统 Chrome/Edge')
+  assert.equal(browserExecutableVersion(fakeEdge, {
+    platform: 'win32',
+    spawn: (command, args) => {
+      assert.equal(command, 'powershell.exe')
+      assert.ok(args.includes('-EncodedCommand'), '含空格的浏览器路径应通过编码命令安全传给 PowerShell')
+      return { stdout: '151.0.4129.59\r\n', stderr: '', status: 0 }
+    }
+  }), '151.0.4129.59', '应正确读取 Windows 浏览器文件版本')
   let createdExtraPage = false
   const initialBlank = { url: () => 'about:blank' }
   assert.equal(await newPageSafe({

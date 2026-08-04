@@ -90,7 +90,7 @@ AnyRouter 同理（`#中转添加cookie anyrouter.top <session值> <用户ID>`�
   - 一个群都没推成功时（未配置目标群 / 机器人已退群或被禁言）自动**私聊兜底**，不会静默丢结果
 - `push.usersPerImage`：群合并转发每张图最多展示的用户数（默认 5）
 - `browser.enable`：浏览器方案总开关（AnyRouter 过 WAF、Turnstile 站点降级签到）
-- `browser.executablePath`：浏览器程序路径；留空时优先自动使用系统 Chrome/Edge。Turnstile 报 `300*`/`600*` 时应确认系统浏览器为最新版，也可显式填写 Chrome 路径
+- `browser.executablePath`：浏览器程序路径；留空时自动选择版本最高的系统 Chrome/Edge。Turnstile 报 `300*`/`600*` 时应先更新系统浏览器，也可显式填写最新版 Chrome/Edge 路径
 - `browser.turnstileTimeoutSec`：关闭可见接管后，Turnstile 无头尝试时间（默认 30 秒，范围 5~120）
 - `browser.turnstileInteractive`：是否直接打开可见浏览器处理 Turnstile（默认开启）。可见模式按站点、代理和浏览器内核使用独立持久档案，复选框真正可交互后才自动点击；Cloudflare 未放行时可人工接管
 - `browser.turnstileInteractiveTimeoutSec`：可见浏览器等待验证的时间（默认 120 秒，范围 30~600）
