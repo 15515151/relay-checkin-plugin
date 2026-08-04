@@ -180,7 +180,7 @@ async function getPrivateBlock(e) {
   if (!other?.disablePrivate) return null
   const adopt = (Array.isArray(other.disableAdopt) ? other.disableAdopt : [])
     .filter(s => s != null && s !== '')
-  return { passable: adopt.some(s => '中转绑定'.includes(String(s))) }
+  return { passable: adopt.some(s => '中转绑定'.includes(String(s)) || '中转站绑定'.includes(String(s))) }
 }
 
 export default class RelayCheckinApp extends plugin {
@@ -191,16 +191,16 @@ export default class RelayCheckinApp extends plugin {
       event: 'message',
       priority: 5000,
       rule: [
-        { reg: '^#中转(站)?(帮助|help)$', fnc: 'help' },
-        { reg: '^#中转添加邮箱\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addEmail' },
-        { reg: '^#中转添加[cC]ookie\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addCookie' },
-        { reg: '^#中转添加\\s+\\S+(?:\\s+\\S+)*$', fnc: 'add' },
-        { reg: '^#中转列表$', fnc: 'list' },
-        { reg: '^#中转删除\\s*(\\d+)$', fnc: 'remove' },
-        { reg: '^#中转签到\\s*(\\d+)?$', fnc: 'checkin' },
-        { reg: '^#中转查询$', fnc: 'query' },
-        { reg: '^#中转定时\\s*(开|关)\\s*(\\d+)?$', fnc: 'toggleAuto' },
-        { reg: '^#中转(开启|关闭)(定时(签到)?)?群推送$', fnc: 'togglePushGroup' },
+        { reg: '^#中转(?:站)?(帮助|help)$', fnc: 'help' },
+        { reg: '^#中转(?:站)?添加邮箱\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addEmail' },
+        { reg: '^#中转(?:站)?添加[cC]ookie\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addCookie' },
+        { reg: '^#中转(?:站)?添加\\s+\\S+(?:\\s+\\S+)*$', fnc: 'add' },
+        { reg: '^#中转(?:站)?列表$', fnc: 'list' },
+        { reg: '^#中转(?:站)?删除\\s*(\\d+)$', fnc: 'remove' },
+        { reg: '^#中转(?:站)?签到\\s*(\\d+)?$', fnc: 'checkin' },
+        { reg: '^#中转(?:站)?查询$', fnc: 'query' },
+        { reg: '^#中转(?:站)?定时\\s*(开|关)\\s*(\\d+)?$', fnc: 'toggleAuto' },
+        { reg: '^#中转(?:站)?(开启|关闭)(定时(签到)?)?群推送$', fnc: 'togglePushGroup' },
         // 私聊补发凭据兜底：命中任意消息，处理器按原始文本与绑定会话判断是否消费
         // （不能按首字符过滤：/ 开头的令牌会被核心归一化，规则层看不到原字符）
         { reg: '^[\\s\\S]+$', fnc: 'bindCredentials', log: false }
@@ -581,7 +581,7 @@ export default class RelayCheckinApp extends plugin {
   async bindCredentials() {
     const raw = rawText(this.e)
     if (!raw) return false
-    const prefixed = /^[#＃/\\]?\s*中转绑定/.test(raw)
+    const prefixed = /^[#＃/\\]?\s*中转(?:站)?绑定/.test(raw)
 
     if (this.e.isGroup) {
       // 带前缀说明是误发到群的凭据：尽量撤回并提醒；普通群聊消息放行
@@ -605,7 +605,7 @@ export default class RelayCheckinApp extends plugin {
     // 原文确实以 # 开头的是指令，放行给其他插件；凭据不会以 # 开头
     if (!prefixed && /^[#＃]/.test(raw)) return false
 
-    const parts = raw.replace(/^[#＃/\\]?\s*中转绑定\s*/, '').split(/\s+/).filter(Boolean)
+    const parts = raw.replace(/^[#＃/\\]?\s*中转(?:站)?绑定\s*/, '').split(/\s+/).filter(Boolean)
     if (!parts.length) {
       if (prefixed) {
         await this.reply('请在 中转绑定 后附上凭据，例如：中转绑定 令牌')
@@ -765,7 +765,7 @@ export default class RelayCheckinApp extends plugin {
       return true
     }
 
-    const indexMatch = /^#中转签到\s*(\d+)$/.exec(this.e.msg)
+    const indexMatch = /^#中转(?:站)?签到\s*(\d+)$/.exec(this.e.msg)
     const index = indexMatch ? Number(indexMatch[1]) : null
     if (index !== null && (index < 1 || index > entry.accounts.length)) {
       await this.reply(`序号 ${index} 不存在，发送 #中转列表 查看`)
@@ -811,7 +811,7 @@ export default class RelayCheckinApp extends plugin {
    * #中转定时 开/关 序号  → 单个账号的定时开关（默认开）
    */
   async toggleAuto() {
-    const match = /^#中转定时\s*(开|关)\s*(\d+)?$/.exec(this.e.msg)
+    const match = /^#中转(?:站)?定时\s*(开|关)\s*(\d+)?$/.exec(this.e.msg)
     if (!match) return false
     const enable = match[1] === '开'
     const index = match[2] ? Number(match[2]) : null

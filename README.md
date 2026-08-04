@@ -2,6 +2,8 @@
 
 TRSS-Yunzai 中转站自动签到插件（OneBot v11）。支持主流开源中转站程序（new-api / Veloera 及同源魔改站）与 AnyRouter、AgentRouter 的手动签到、每日定时签到与余额查询，结果以图片发送，数据按用户隔离，群内所有人可用。
 
+所有 `#中转...` 指令同时兼容 `#中转站...` 写法（例如 `#中转站签到`、`#中转站列表`）。
+
 ## 功能
 
 - 自动识别站点类型（new-api 令牌 / Veloera 令牌 / AnyRouter / AgentRouter / Cookie 通用）

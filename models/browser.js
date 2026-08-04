@@ -7,7 +7,7 @@ import { proxyForHost } from './adapters/common.js'
 import { assertSafeRequestUrl } from './url-security.js'
 
 /**
- * 浏览器工具：用于过阿里云 WAF（AnyRouter 系）与 Cloudflare Turnstile 挑战。
+ * 浏览器工具：用于过阿里云 WAF（AnyRouter 系）、Cloudflare Turnstile 与 NewAPI POW 挑战。
  * puppeteer 惰性加载（复用 Yunzai 根目录依赖，缺失时仅浏览器功能不可用，不影响插件加载）。
  *
  * 无头实例按代理模式复用；可见实例按站点、代理和浏览器内核隔离，并使用持久用户档案。
@@ -446,7 +446,7 @@ function noteResult(host, ok) {
 }
 
 function browserResultOk(out) {
-  return !out?.wafBlocked && !out?.turnstileFailed && out?.status !== 0
+  return !out?.wafBlocked && !out?.turnstileFailed && !out?.powFailed && out?.status !== 0
 }
 
 /**
@@ -706,13 +706,275 @@ async function pageFetch(page, url, { method = 'GET', headers = {}, timeoutMs: o
       } finally {
         clearTimeout(timer)
       }
-    }, { url, method, headers, timeoutMs })
+    }, { url, method, headers: browserRequestHeaders(headers), timeoutMs })
     // evaluate 自身也可能不返回（挑战页导航中/渲染器卡住），外层再兜一层超时，
     // 否则单轮探测就能吃掉整个 WAF 预算且不留任何日志
     return await withTimeout(evaluating, timeoutMs + 5000, '页内请求无响应')
   } catch (err) {
     return { status: 0, json: null, error: String(err?.message || err) }
   }
+}
+
+function browserRequestHeaders(headers = {}) {
+  const out = {}
+  for (const [key, value] of Object.entries(headers || {})) {
+    // Cookie/Host/Content-Length 是浏览器禁止脚本设置的受限请求头。
+    if (/^(?:cookie|host|content-length)$/i.test(key)) continue
+    if (value !== undefined && value !== null) out[key] = String(value)
+  }
+  return out
+}
+
+async function injectSessionCookies(page, host, headers = {}) {
+  const cookieEntry = Object.entries(headers || {}).find(([key]) => /^cookie$/i.test(key))
+  if (!cookieEntry?.[1] || typeof page?.setCookie !== 'function') return
+  const cookies = String(cookieEntry[1]).split(';').map(part => part.trim()).filter(Boolean)
+  for (const item of cookies) {
+    const separator = item.indexOf('=')
+    if (separator <= 0) continue
+    const name = item.slice(0, separator).trim()
+    const value = item.slice(separator + 1).trim()
+    if (!name || !value) continue
+    await withTimeout(
+      page.setCookie({ name, value, domain: host, path: '/', secure: true }),
+      10000,
+      `注入 ${name} cookie 超时`
+    )
+  }
+}
+
+/**
+ * 在目标站点页面内完成 NewAPI POW-Shield 校验并提交签到。
+ * 该流程对应站点公开前端 POWCaptcha：挑战接口 → SHA-256 nonce → 指纹/风险信息
+ * → pow_token 查询参数。所有步骤都在同一个浏览器页和出口内完成。
+ */
+export async function powCheckin(account, { checkinPath, headers = {}, validationHeaders = headers, timeoutSec = null } = {}) {
+  const cfg = getConfig()
+  const host = new URL(account.baseUrl).hostname
+  const timeout = Math.max(15, Math.min(Number(timeoutSec ?? cfg.browser.powTimeoutSec ?? 120) || 120, 300))
+  const challengeUrl = new URL('/api/user/self/pow/challenge', `${account.baseUrl}/`).toString()
+  const checkinUrl = new URL(checkinPath, `${account.baseUrl}/`).toString()
+  const requestHeaders = browserRequestHeaders(headers)
+  const checkinHeaders = browserRequestHeaders(validationHeaders)
+  const cookieHeaders = headers
+
+  return await withPage(host, async page => {
+    await injectSessionCookies(page, host, cookieHeaders)
+    await navigateForTurnstile(page, account.baseUrl)
+
+    const evaluating = page.evaluate(async ({ challengeUrl, checkinUrl, requestHeaders, checkinHeaders, timeoutMs }) => {
+      const textOf = value => value == null ? '' : String(value)
+      const parseResponse = async response => {
+        let text = ''
+        let json = null
+        try {
+          text = await response.text()
+          try { json = JSON.parse(text) } catch { /* 非 JSON */ }
+        } catch {
+          // 连接中断时保留空响应，由外层给出明确错误
+        }
+        return {
+          status: response.status,
+          json,
+          textSnippet: json ? '' : text.slice(0, 512)
+        }
+      }
+      const hashText = async value => {
+        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+        return Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, '0')).join('')
+      }
+      const legacyHash = value => {
+        let result = 0
+        for (let i = 0; i < value.length; i++) result = (result << 5) - result + value.charCodeAt(i) | 0
+        return result >>> 0
+      }
+      const canvasFingerprint = () => {
+        try {
+          const canvas = document.createElement('canvas')
+          canvas.width = 200
+          canvas.height = 50
+          const context = canvas.getContext('2d')
+          context.textBaseline = 'top'
+          context.font = '14px Arial'
+          context.fillStyle = '#f60'
+          context.fillRect(50, 0, 80, 30)
+          context.fillStyle = '#069'
+          context.fillText('POW-Shield', 2, 15)
+          context.fillStyle = 'rgba(102,204,0,0.7)'
+          context.fillText('captcha.fp', 4, 35)
+          context.globalCompositeOperation = 'multiply'
+          context.fillStyle = 'rgb(255,0,255)'
+          context.beginPath()
+          context.arc(50, 25, 20, 0, Math.PI * 2)
+          context.fill()
+          return legacyHash(canvas.toDataURL())
+        } catch {
+          return 0
+        }
+      }
+      const webglFingerprint = () => {
+        try {
+          const canvas = document.createElement('canvas')
+          const context = canvas.getContext('webgl') || canvas.getContext('experimental-webgl')
+          if (!context) return 0
+          const debug = context.getExtension('WEBGL_debug_renderer_info')
+          const renderer = debug ? context.getParameter(debug.UNMASKED_RENDERER_WEBGL) : ''
+          const vendor = debug ? context.getParameter(debug.UNMASKED_VENDOR_WEBGL) : ''
+          return legacyHash([
+            context.getParameter(context.MAX_TEXTURE_SIZE),
+            context.getParameter(context.MAX_RENDERBUFFER_SIZE),
+            context.getParameter(context.MAX_VERTEX_ATTRIBS),
+            renderer,
+            vendor
+          ].join('|'))
+        } catch {
+          return 0
+        }
+      }
+      const automationSignals = () => {
+        const signals = []
+        if (navigator.webdriver) signals.push('webdriver')
+        if (/HeadlessChrome/.test(navigator.userAgent)) signals.push('headless')
+        if (navigator.webdriver_evaluate) signals.push('webdriver_evaluate')
+        if (!window.chrome && /Chrome/.test(navigator.userAgent)) signals.push('fake_chrome')
+        if (navigator.plugins.length === 0 && !/Mobile|Android/i.test(navigator.userAgent)) signals.push('no_plugins')
+        if (screen.width === 0 || screen.height === 0) signals.push('zero_screen')
+        return { signals, score: signals.length }
+      }
+      const behavior = { score: 20, moveCount: 0, totalDist: 0 }
+      const encode = value => {
+        const json = JSON.stringify(value)
+        try { return btoa(json) } catch { return btoa(unescape(encodeURIComponent(json))) }
+      }
+      const randomId = () => globalThis.crypto?.randomUUID
+        ? globalThis.crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`
+      const storageGet = (storage, key) => {
+        try { return storage?.getItem(key) || '' } catch { return '' }
+      }
+      const storageSet = (storage, key, value) => {
+        try { storage?.setItem(key, value) } catch { /* 隐私模式可能禁用存储 */ }
+      }
+      const withPageIntegrityHeaders = async headers => {
+        const hasGameHeaders = Object.keys(headers || {}).some(key => /^x-game-/i.test(key))
+        if (!hasGameHeaders) return headers
+        const out = { ...headers }
+        const sessionKey = 'newapi_game_integrity_session_v1'
+        const seqKey = 'newapi_game_integrity_seq_v1'
+        const sessionId = storageGet(sessionStorage, sessionKey) || randomId()
+        const savedSeq = Number(storageGet(sessionStorage, seqKey) || '0')
+        const seq = (Number.isFinite(savedSeq) ? savedSeq : 0) + 1
+        storageSet(sessionStorage, sessionKey, sessionId)
+        storageSet(sessionStorage, seqKey, String(seq))
+        const timezone = (() => {
+          try { return Intl.DateTimeFormat().resolvedOptions().timeZone || '' } catch { return '' }
+        })()
+        const fingerprint = await hashText([
+          navigator.userAgent || '',
+          navigator.language || '',
+          navigator.platform || '',
+          timezone,
+          String(navigator.hardwareConcurrency || ''),
+          String(navigator.deviceMemory || '')
+        ].join('|'))
+        out['X-Game-Action-Id'] = randomId()
+        out['X-Game-Client-Ts'] = String(Date.now())
+        out['X-Game-Session-Id'] = sessionId
+        out['X-Game-Client-Seq'] = String(seq)
+        out['X-Game-Client-Fingerprint'] = fingerprint
+        out['X-Game-Body-SHA256'] = await hashText('')
+        return out
+      }
+
+      let postStarted = false
+      try {
+        const deadline = Date.now() + timeoutMs
+        const challengeResponse = await fetch(challengeUrl, {
+          headers: requestHeaders,
+          credentials: 'include',
+          cache: 'no-store'
+        })
+        const challengeResult = await parseResponse(challengeResponse)
+        const challengeData = challengeResult.json?.success ? challengeResult.json.data : null
+        if (!challengeData?.enabled) {
+          return {
+            powFailed: true,
+            message: challengeData ? '站点未返回可用的 POW 挑战参数' : (challengeResult.json?.message || `获取安全验证挑战失败 (HTTP ${challengeResult.status})`),
+            detail: challengeResult
+          }
+        }
+        const challenge = textOf(challengeData.challenge)
+        const difficulty = Number(challengeData.difficulty)
+        if (!challenge || !Number.isInteger(difficulty) || difficulty < 1 || difficulty > 8) {
+          return { powFailed: true, message: '站点返回的 POW 挑战参数无效', detail: challengeResult }
+        }
+
+        const automation = automationSignals()
+        let risk = 0
+        if (automation.score >= 2) risk += 40
+        risk += automation.score * 5
+        if (behavior.score < 30) risk += 30
+        risk = Math.min(100, risk)
+        if (risk >= 70) {
+          return { powFailed: true, message: '浏览器环境风险过高，站点拒绝 POW 验证', detail: { risk, automation } }
+        }
+
+        const prefix = '0'.repeat(difficulty)
+        const batchSize = 500
+        const startedAt = performance.now()
+        let nonce = 0
+        let hash = ''
+        while (!hash) {
+          if (Date.now() >= deadline) return { powFailed: true, message: `POW 计算超过 ${timeoutMs / 1000} 秒` }
+          const hashes = await Promise.all(Array.from({ length: batchSize }, (_, offset) => hashText(challenge + (nonce + offset))))
+          const hit = hashes.findIndex(value => value.startsWith(prefix))
+          if (hit >= 0) {
+            nonce += hit
+            hash = hashes[hit]
+            break
+          }
+          nonce += batchSize
+        }
+
+        const tokenPayload = {
+          challenge,
+          pow: { nonce, hash, time: Number(((performance.now() - startedAt) / 1000).toFixed(2)) },
+          fingerprint: { canvas: canvasFingerprint(), webgl: webglFingerprint() },
+          behavior,
+          automation: automation.signals,
+          risk,
+          ts: Date.now(),
+          path: challengeData.path || '',
+          purpose: challengeData.purpose || '',
+          body_hash: challengeData.body_hash || challengeData.bodyHash || ''
+        }
+        const token = encode(tokenPayload)
+        const url = new URL(checkinUrl)
+        url.searchParams.set('pow_token', token)
+        postStarted = true
+        const checkinResponse = await fetch(url.toString(), {
+          method: 'POST',
+          headers: await withPageIntegrityHeaders(checkinHeaders),
+          credentials: 'include',
+          cache: 'no-store'
+        })
+        return await parseResponse(checkinResponse)
+      } catch (error) {
+        return { powFailed: true, uncertain: postStarted, message: textOf(error?.message || error) }
+      }
+    }, {
+      challengeUrl,
+      checkinUrl,
+      requestHeaders,
+      checkinHeaders,
+      timeoutMs: timeout * 1000
+    })
+    return await withTimeout(evaluating, (timeout + 15) * 1000, 'POW 页面请求无响应')
+  }, {
+    interactive: turnstileBrowserMode(cfg.browser) === 'interactive',
+    profileKey: host,
+    trackResult: false
+  })
 }
 
 /**
@@ -1212,9 +1474,10 @@ function turnstileFailureMessage(result, timeoutSec, interactive = false) {
  * 在一种浏览器模式内完成 Turnstile 获取与签到提交。token 由 Cloudflare 绑定当前
  * 浏览器上下文和出口网络，因此必须在同一个页面里立即提交，不能跨模式搬运。
  */
-async function runTurnstileAttempt(account, { checkinPath, headers, siteKey }, { interactive, timeoutSec }) {
+async function runTurnstileAttempt(account, { checkinPath, headers, validationHeaders = headers, siteKey }, { interactive, timeoutSec }) {
   const host = new URL(account.baseUrl).hostname
   return await withPage(host, async page => {
+    await injectSessionCookies(page, host, headers)
     await withTimeout(page.setBypassCSP(true), 15000, '设置 Turnstile 页面策略超时')
     await navigateForTurnstile(page, account.baseUrl)
 
@@ -1230,7 +1493,7 @@ async function runTurnstileAttempt(account, { checkinPath, headers, siteKey }, {
     logger.info(`[relay-checkin-plugin] Turnstile ${interactive ? '可见' : '无头'}验证已签发 token，正在提交签到接口`)
     const url = new URL(checkinPath, `${account.baseUrl}/`)
     url.searchParams.set('turnstile', attempt.token)
-    return await pageFetch(page, url.toString(), { method: 'POST', headers })
+    return await pageFetch(page, url.toString(), { method: 'POST', headers: validationHeaders })
   }, { interactive, profileKey: host, trackResult: false })
 }
 
@@ -1254,7 +1517,8 @@ export function browserHangBudgetMs(browser = {}) {
   const interactiveSec = !interactiveEnabled
     ? 0
     : boundedSeconds(browser.turnstileInteractiveTimeoutSec, 120, 30, 600)
-  const activeSec = interactiveEnabled ? interactiveSec : quickSec
+  const powSec = boundedSeconds(browser.powTimeoutSec, 120, 15, 300)
+  const activeSec = Math.max(interactiveEnabled ? interactiveSec : quickSec, powSec)
   // 300 秒覆盖 launch/newPage/初始化/导航/接口提交/关闭的硬超时余量。
   return (slotSec + activeSec + 300) * 1000
 }
@@ -1266,7 +1530,7 @@ export function browserHangBudgetMs(browser = {}) {
  * @param {object} opts { checkinPath: 签到接口路径, headers: 鉴权请求头, siteKey: Turnstile site key }
  * @returns {Promise<{status: number, json: object|null}|{turnstileFailed: true}>}
  */
-export async function turnstileCheckin(account, { checkinPath, headers, siteKey }) {
+export async function turnstileCheckin(account, { checkinPath, headers, validationHeaders = headers, siteKey }) {
   const cfg = getConfig()
   const host = new URL(account.baseUrl).hostname
   const quickTimeoutSec = boundedSeconds(cfg.browser.turnstileTimeoutSec, 30, 5, 120)
@@ -1278,7 +1542,7 @@ export async function turnstileCheckin(account, { checkinPath, headers, siteKey 
     try {
       interactive = await runTurnstileAttempt(
         account,
-        { checkinPath, headers, siteKey },
+        { checkinPath, headers, validationHeaders, siteKey },
         { interactive: true, timeoutSec: interactiveTimeoutSec }
       )
     } catch (err) {
@@ -1304,7 +1568,7 @@ export async function turnstileCheckin(account, { checkinPath, headers, siteKey 
   try {
     quick = await runTurnstileAttempt(
       account,
-      { checkinPath, headers, siteKey },
+      { checkinPath, headers, validationHeaders, siteKey },
       { interactive: false, timeoutSec: quickTimeoutSec }
     )
   } catch (err) {

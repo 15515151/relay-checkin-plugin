@@ -67,6 +67,14 @@ export default {
     return headers
   },
 
+  // 浏览器验证后的写请求同时需要网页端生成的完整性标记。
+  buildValidationHeaders(account, body = '') {
+    return {
+      ...this.buildHeaders(account),
+      ...gameIntegrityHeaders(account, body)
+    }
+  },
+
   async userInfo(account) {
     const { json } = await request(`${account.baseUrl}/api/user/self`, {
       headers: this.buildHeaders(account)

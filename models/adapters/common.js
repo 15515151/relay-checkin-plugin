@@ -133,7 +133,11 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
       }
     }
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), tMs)
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      controller.abort()
+    }, tMs)
     try {
       const res = await fetch(targetUrl, {
         method: normalizedMethod,
@@ -158,7 +162,9 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
         setCookies: responseSetCookies(res.headers)
       }
     } catch (err) {
-      lastErr = err
+      lastErr = timedOut
+        ? new Error(`请求超时（${tMs / 1000} 秒）`)
+        : err
     } finally {
       clearTimeout(timer)
     }
@@ -208,9 +214,30 @@ export function parseUserInfo(json) {
 }
 
 /**
+ * 识别签到接口要求的校验类型。
+ * NewAPI 及其魔改站的校验提示既可能放在 message，也可能放在 code/error_code，
+ * 因此先统一分类，再由执行器选择 Turnstile、POW 或普通 WAF 处理。
+ */
+export function classifyValidation(json, meta = {}) {
+  const msg = json?.message || json?.msg || json?.error?.message || ''
+  const code = json?.code || json?.error_code || json?.error?.code || ''
+  const text = `${code} ${msg} ${meta.textSnippet || ''}`
+  if (/pow[_ -]?shield|pow[_ -]?(?:captcha|token)|verification_required|verification_expired|verification_invalid|需要完成安全验证|安全验证|security verification|proof.?of.?work/i.test(text)) {
+    return 'pow'
+  }
+  if (/turnstile/i.test(text)) return 'turnstile'
+  if (/captcha|验证码|人机/i.test(text)) return 'captcha'
+  if (/访问验证|checking your browser|aliyun_waf|acw_sc|cloudflare|waf/i.test(text)) return 'waf'
+  return null
+}
+
+/**
  * 解析签到响应为统一结构
  */
 export function parseCheckinResult(status, json, meta = {}) {
+  if ([520, 521, 522, 523, 524, 525, 526].includes(Number(status))) {
+    return { ok: false, already: false, msg: `站点源服务器无响应 (HTTP ${status})` }
+  }
   if (status === 404) {
     return { ok: false, already: false, msg: '站点无此签到接口（可能未启用签到功能）' }
   }
@@ -218,14 +245,21 @@ export function parseCheckinResult(status, json, meta = {}) {
     return { ok: false, already: false, msg: '被重定向到登录页，凭据可能已失效' }
   }
   const msg = json?.message || json?.msg || json?.error?.message || ''
-  const challengeText = `${msg} ${meta.textSnippet || ''}`
-  if (/turnstile|captcha|人机|验证码|访问验证|checking your browser|aliyun_waf|acw_sc/i.test(challengeText)) {
-    return { ok: false, already: false, msg: /turnstile/i.test(challengeText)
-      ? '站点开启了 Turnstile 人机验证，无法直接签到'
-      : '请求被站点 WAF/人机验证拦截' }
+  const validation = classifyValidation(json, meta)
+  if (validation) {
+    const validationMessage = {
+      turnstile: '站点开启了 Turnstile 人机验证，无法直接签到',
+      pow: '站点要求完成安全验证（POW），无法直接签到',
+      captcha: '站点要求完成验证码/人机验证，无法直接签到',
+      waf: '请求被站点 WAF/人机验证拦截'
+    }[validation]
+    return { ok: false, already: false, validation, msg: validationMessage }
   }
   if (status === 401 || status === 403) {
     return { ok: false, already: false, msg: `凭据无效或已过期 (HTTP ${status})` }
+  }
+  if (Number(status) === 0 && meta?.error) {
+    return { ok: false, already: false, msg: `请求失败：${String(meta.error)}` }
   }
   if (!json) {
     return { ok: false, already: false, msg: `响应异常 (HTTP ${status})` }

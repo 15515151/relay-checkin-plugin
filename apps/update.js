@@ -8,7 +8,7 @@ export class RelayCheckinUpdate extends plugin {
       event: 'message',
       priority: 1000,
       rule: [
-        { reg: /^#?中转插件(强制)?更新$/, fnc: 'update', permission: 'master' }
+        { reg: /^#?中转(?:站)?插件(强制)?更新$/, fnc: 'update', permission: 'master' }
       ]
     })
   }

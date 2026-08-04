@@ -10,7 +10,9 @@ import { request, parseUserInfo, parseCheckinResult } from './common.js'
 export default {
   type: 'generic',
   label: 'Cookie通用',
+  checkinPath: '/api/user/sign_in',
   compareBalance: true,
+  reconcileByBalance: true,
 
   buildHeaders(account) {
     return {
