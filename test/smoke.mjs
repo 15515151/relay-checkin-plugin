@@ -63,7 +63,13 @@ try {
   console.log('config OK')
 
   // ---- browser pool/profile pure logic ----
-  const { browserPoolKey, interactiveProfilePath, browserHangBudgetMs } = await import('../models/browser.js')
+  const {
+    browserPoolKey,
+    interactiveProfilePath,
+    browserHangBudgetMs,
+    navigateForTurnstile,
+    autoClickTurnstileCheckbox
+  } = await import('../models/browser.js')
   assert.equal(
     browserPoolKey({ proxyServer: '', profileKey: 'ioll.pp.ua' }),
     'headless|direct',
@@ -88,7 +94,7 @@ try {
     interactiveProfilePath('ioll.pp.ua').startsWith(path.join(DATA, 'browser-profile')),
     '持久浏览器档案必须保存在已忽略提交的 data 目录'
   )
-  assert.equal(browserHangBudgetMs(cfg.browser), 420000, '默认总预算应覆盖 120 秒排队和完整浏览器流程')
+  assert.equal(browserHangBudgetMs(cfg.browser), 990000, '默认总预算应覆盖两阶段排队、验证与浏览器硬超时余量')
   assert.equal(
     browserHangBudgetMs({
       slotWaitSec: 600,
@@ -96,9 +102,101 @@ try {
       turnstileInteractive: true,
       turnstileInteractiveTimeoutSec: 600
     }),
-    1440000,
+    2520000,
     '配置取最大值时总预算仍必须覆盖两阶段等待与启动余量'
   )
+  assert.equal(
+    browserHangBudgetMs({
+      slotWaitSec: 120,
+      turnstileTimeoutSec: 30,
+      turnstileInteractive: false,
+      turnstileInteractiveTimeoutSec: 600
+    }),
+    450000,
+    '关闭可见接管时不应计入第二次排队和交互等待'
+  )
+  let stoppedPartialPage = false
+  const partialNavigation = await navigateForTurnstile({
+    goto: async () => { throw new Error('Navigation timeout of 30000 ms exceeded') },
+    url: () => 'https://ioll.pp.ua/',
+    waitForSelector: async selector => selector === 'body' ? {} : null,
+    evaluate: async () => { stoppedPartialPage = true }
+  }, 'https://ioll.pp.ua')
+  assert.equal(partialNavigation.partial, true, '同源页面主体可用时不应被 DOMContentLoaded 超时误杀')
+  assert.equal(stoppedPartialPage, true, '继续前应停止页面剩余的悬挂加载')
+  await assert.rejects(
+    navigateForTurnstile({
+      goto: async () => { throw new Error('Navigation timeout of 30000 ms exceeded') },
+      url: () => 'chrome-error://chromewebdata/',
+      waitForSelector: async () => null,
+      evaluate: async () => {}
+    }, 'https://ioll.pp.ua'),
+    /打开站点页面超时/,
+    '浏览器错误页仍应判定为真实导航失败'
+  )
+  let checkedBodyForCertificateError = false
+  await assert.rejects(
+    navigateForTurnstile({
+      goto: async () => { throw new Error('net::ERR_CERT_AUTHORITY_INVALID') },
+      url: () => 'https://ioll.pp.ua/',
+      waitForSelector: async () => { checkedBodyForCertificateError = true; return {} },
+      evaluate: async () => {}
+    }, 'https://ioll.pp.ua'),
+    /打开站点页面失败.*ERR_CERT_AUTHORITY_INVALID/,
+    '证书等非超时错误不能因同源 body 存在而被放行'
+  )
+  assert.equal(checkedBodyForCertificateError, false, '非恢复型导航错误不应检查或复用错误页主体')
+  await assert.rejects(
+    navigateForTurnstile({
+      goto: async () => ({}),
+      url: () => 'https://other.example/',
+      waitForSelector: async () => null,
+      evaluate: async () => {}
+    }, 'https://ioll.pp.ua'),
+    /跳转到了不同域名.*请使用该最终地址重新绑定/,
+    'Turnstile token 与提交接口必须保持同源'
+  )
+
+  let clickedPoint = null
+  let iframeDisposed = false
+  const frameHandle = {
+    boundingBox: async () => ({ x: 100, y: 200, width: 300, height: 65 }),
+    dispose: async () => { iframeDisposed = true }
+  }
+  const clicked = await autoClickTurnstileCheckbox({
+    frames: () => [{
+      url: () => 'https://challenges.cloudflare.com/cdn-cgi/challenge-platform/turnstile',
+      frameElement: async () => frameHandle
+    }],
+    $: async () => { throw new Error('frame tree 命中后不应再走 DOM 回退') },
+    mouse: {
+      move: async () => {},
+      click: async (x, y, options) => { clickedPoint = { x, y, options } }
+    },
+    evaluate: async () => {}
+  }, 30, () => false)
+  assert.equal(clicked, true, '标准 Turnstile iframe 应自动点击一次')
+  assert.deepEqual(clickedPoint, { x: 130, y: 232.5, options: { delay: 120 } })
+  assert.equal(iframeDisposed, true, '自动点击后应释放 iframe 句柄')
+
+  let manualCompleted = false
+  let clickedAfterManual = false
+  const canceledClick = await autoClickTurnstileCheckbox({
+    $: async () => {
+      setTimeout(() => { manualCompleted = true }, 50)
+      return {
+        boundingBox: async () => ({ x: 100, y: 200, width: 300, height: 65 }),
+        dispose: async () => {}
+      }
+    },
+    mouse: {
+      move: async () => {},
+      click: async () => { clickedAfterManual = true }
+    },
+    evaluate: async () => {}
+  }, 30, () => manualCompleted)
+  assert.equal(canceledClick, false, '人工验证先完成时应取消待执行的自动点击')
+  assert.equal(clickedAfterManual, false, 'token 已生成后不得再点击验证控件')
   console.log('browser profile OK')
 
   // ---- adapters/common ----

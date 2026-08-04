@@ -103,19 +103,18 @@ async function getPuppeteer() {
   }
 }
 
-// 反自动化检测：任一项失败都不应中断页面初始化，整体 try 包裹
+// 反自动化检测：各项独立保护，任一项失败都不影响其余初始化。
 const STEALTH_SCRIPT = `
+  try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }) } catch (e) {}
+  try { window.chrome = window.chrome || { runtime: {} } } catch (e) {}
+  try { Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] }) } catch (e) {}
   try {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
-    window.chrome = window.chrome || { runtime: {} }
-    Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] })
-    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] })
     const origQuery = window.navigator.permissions?.query
     if (origQuery) {
       window.navigator.permissions.query = parameters =>
         parameters.name === 'notifications'
-          ? Promise.resolve({ state: Notification.permission })
-          : origQuery(parameters)
+          ? Promise.resolve({ state: globalThis.Notification?.permission || 'default' })
+          : origQuery.call(window.navigator.permissions, parameters)
     }
   } catch (e) {}
 `
@@ -156,6 +155,16 @@ function isBrowserAlive(inst) {
 
 async function browserUserAgent(browser) {
   const configured = String(getConfig().request.userAgent || '')
+  try {
+    const native = String(await browser.userAgent())
+    if (/(?:Headless)?Chrome\/[\d.]+/.test(native)) {
+      // 沿用 Chromium 实际操作系统和版本，仅去掉无头专用标记，避免 UA 与
+      // navigator.platform 在 Linux 部署时出现 Windows/Linux 自相矛盾。
+      return native.replace(/HeadlessChrome\//, 'Chrome/')
+    }
+  } catch {
+    // 老版本 Puppeteer 取不到 userAgent 时再回落到配置值
+  }
   try {
     const version = await browser.version()
     const runtime = String(version).match(/(?:Chrome|Chromium)\/([\d.]+)/)?.[1]
@@ -205,6 +214,7 @@ async function getBrowser(pool, proxy, { interactive = false, profileKey = '' } 
         '--disable-dev-shm-usage',
         '--disable-blink-features=AutomationControlled',
         '--disable-features=TranslateUI,BackForwardCache',
+        '--lang=zh-CN',
         '--no-first-run',
         '--no-default-browser-check'
       ]
@@ -381,6 +391,7 @@ async function withPage(host, fn, { interactive = false, profileKey = host, trac
       const userAgent = await withTimeout(browserUserAgent(browser), 15000, '读取浏览器版本超时')
       await withTimeout(page.setUserAgent(userAgent), 15000, '设置 UA 超时（浏览器无响应）')
       await withTimeout(page.setExtraHTTPHeaders({ 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' }), 15000, '设置浏览器语言超时')
+      await withTimeout(page.setBypassServiceWorker(true), 15000, '禁用页面 Service Worker 超时')
       await withTimeout(page.evaluateOnNewDocument(STEALTH_SCRIPT), 15000, '注入初始化脚本超时（浏览器无响应）')
       await installNavigationGuard(page)
       if (interactive) await withTimeout(page.bringToFront(), 15000, '显示浏览器窗口超时')
@@ -464,6 +475,58 @@ async function logPageState(page) {
   }
 }
 
+/**
+ * Turnstile 只需要目标源上存在可注入组件的页面主体，不要求站点所有资源都完成加载。
+ * 某些 SPA/统计脚本会让 DOMContentLoaded 长时间不结束；导航超时后若同源 body 已可用，
+ * 停止剩余加载并继续。错误页、跨域页和空白页仍按真实导航失败处理。
+ */
+export async function navigateForTurnstile(page, targetUrl) {
+  try {
+    await withTimeout(
+      page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }),
+      40000,
+      '打开站点页面超时（网络或代理不通）'
+    )
+    const finalUrl = page.url()
+    if (new URL(finalUrl).origin !== new URL(targetUrl).origin) {
+      throw new Error(`站点跳转到了不同域名 ${new URL(finalUrl).origin}，请使用该最终地址重新绑定`)
+    }
+    return { partial: false }
+  } catch (err) {
+    const detail = err?.message || String(err)
+    const recoverableNavigation = /timeout|超时|ERR_ABORTED/i.test(detail)
+    let sameOrigin = false
+    try {
+      sameOrigin = new URL(page.url()).origin === new URL(targetUrl).origin
+    } catch {
+      sameOrigin = false
+    }
+
+    if (recoverableNavigation && sameOrigin) {
+      const body = await withTimeout(
+        page.waitForSelector('body', { timeout: 5000 }),
+        7000,
+        '等待页面主体超时'
+      ).catch(() => null)
+      if (body) {
+        try {
+          if (body.dispose) await withTimeout(body.dispose(), 5000, '释放页面主体句柄超时')
+        } catch {
+          // 页面导航中句柄可能已经失效，不影响后续 window.stop
+        }
+        await withTimeout(page.evaluate(() => window.stop()), 5000, '停止页面剩余加载超时').catch(() => {})
+        logger.warn(`[relay-checkin-plugin] 站点导航未完整结束但同源页面已可用，停止剩余加载并继续 Turnstile: ${detail}`)
+        return { partial: true, detail }
+      }
+    }
+
+    if (/timeout|超时/i.test(detail)) {
+      throw new Error('打开站点页面超时：30 秒内未加载出可用页面，请检查站点或代理网络')
+    }
+    throw new Error(`打开站点页面失败：${detail}`)
+  }
+}
+
 
 /**
  * 打开站点让阿里云 WAF 挑战通过，取出全部 cookie（含 WAF 三件套与 session）。
@@ -507,49 +570,98 @@ export async function fetchWafCookies(account) {
 }
 
 async function setTurnstilePanelStatus(page, text) {
-  await page.evaluate(value => {
-    const el = document.getElementById('relay-checkin-turnstile-status')
-    if (el) el.textContent = value
-  }, text).catch(() => {})
+  await withTimeout(
+    page.evaluate(value => {
+      const el = document.getElementById('relay-checkin-turnstile-status')
+      if (el) el.textContent = value
+    }, text),
+    5000,
+    '更新 Turnstile 页面状态超时'
+  ).catch(() => {})
 }
 
 /**
- * 可见模式先尝试一次正常鼠标点击。Cloudflare iframe 为跨域内容，页面脚本无法读取，
- * 必须从 Puppeteer 的页面坐标点击；若控件结构变化则停止自动操作并交给用户。
+ * 可见模式先尝试一次正常鼠标点击。Cloudflare iframe 为跨域内容且可能位于封装 DOM 中，
+ * 优先从 Puppeteer frame tree 取 frameElement 坐标，普通 DOM 选择器仅作兼容回退。
  */
-async function autoClickTurnstileCheckbox(page, timeoutSec, shouldStop) {
+export async function autoClickTurnstileCheckbox(page, timeoutSec, shouldStop) {
   const deadline = Date.now() + Math.min(timeoutSec * 1000, 20000)
+  let lastError = ''
   while (!shouldStop() && Date.now() < deadline) {
     let iframe = null
     try {
-      iframe = await page.$(
-        '#relay-checkin-turnstile iframe[src*="challenges.cloudflare.com"], ' +
-        '#relay-checkin-turnstile iframe[src*="turnstile"]'
-      )
-      const box = await iframe?.boundingBox()
+      let box = null
+      const challengeFrames = typeof page.frames === 'function'
+        ? page.frames().filter(frame => /challenges\.cloudflare\.com|turnstile/i.test(String(frame.url?.() || '')))
+        : []
+      for (const frame of challengeFrames) {
+        if (!frame?.frameElement) continue
+        let candidate = null
+        try {
+          candidate = await withTimeout(frame.frameElement(), 5000, '从 frame tree 定位 Turnstile iframe 超时')
+          const candidateBox = await withTimeout(candidate.boundingBox(), 5000, '读取 Turnstile frame 坐标超时')
+          if (candidateBox && candidateBox.width >= 200 && candidateBox.height >= 50) {
+            iframe = candidate
+            box = candidateBox
+            break
+          }
+        } finally {
+          if (candidate && candidate !== iframe) {
+            await withTimeout(candidate.dispose(), 5000, '释放隐藏 Turnstile frame 句柄超时').catch(() => {})
+          }
+        }
+      }
+      if (!iframe) {
+        iframe = await withTimeout(
+          page.$(
+            '#relay-checkin-turnstile iframe[src*="challenges.cloudflare.com"], ' +
+            '#relay-checkin-turnstile iframe[src*="turnstile"]'
+          ),
+          5000,
+          '从页面 DOM 定位 Turnstile iframe 超时'
+        )
+      }
+      if (!box) {
+        box = iframe
+          ? await withTimeout(iframe.boundingBox(), 5000, '读取 Turnstile 坐标超时')
+          : null
+      }
       if (box && box.width >= 200 && box.height >= 50) {
+        // iframe 刚出现尺寸时内部复选框未必已绑定事件，短暂稳定后重新取坐标。
+        await new Promise(resolve => setTimeout(resolve, 500))
+        if (shouldStop()) return false
+        box = iframe
+          ? await withTimeout(iframe.boundingBox(), 5000, '复查 Turnstile 坐标超时')
+          : null
+      }
+      if (box && box.width >= 200 && box.height >= 50 && !shouldStop()) {
         const targetX = box.x + Math.min(30, box.width * 0.1)
         const targetY = box.y + Math.min(35, box.height * 0.5)
         const startX = Math.max(1, targetX - 90)
         const startY = Math.max(1, targetY + 35)
-        await page.mouse.move(startX, startY)
-        await page.mouse.move(targetX, targetY, { steps: 14 })
-        await page.mouse.click(targetX, targetY, { delay: 120 })
+        await withTimeout(page.mouse.move(startX, startY), 5000, '移动鼠标到 Turnstile 前超时')
+        await withTimeout(page.mouse.move(targetX, targetY, { steps: 14 }), 5000, '移动鼠标到 Turnstile 超时')
+        await withTimeout(page.mouse.click(targetX, targetY, { delay: 120 }), 5000, '点击 Turnstile 超时')
         await setTurnstilePanelStatus(page, '已自动点击验证，等待 Cloudflare 确认...')
         logger.info('[relay-checkin-plugin] 已自动点击 Turnstile 复选框，等待验证结果')
         return true
       }
-    } catch {
+    } catch (err) {
+      lastError = err?.message || String(err)
       // iframe 正在重建时继续短暂轮询
     } finally {
-      await iframe?.dispose?.().catch(() => {})
+      try {
+        if (iframe?.dispose) await withTimeout(iframe.dispose(), 5000, '释放 Turnstile iframe 句柄超时')
+      } catch {
+        // iframe 在验证过程中会重建，旧句柄失效属正常情况
+      }
     }
     await new Promise(resolve => setTimeout(resolve, 350))
   }
 
   if (!shouldStop()) {
-    await setTurnstilePanelStatus(page, '未能自动点击，请手动勾选上方“请验证您是真人”')
-    logger.warn('[relay-checkin-plugin] 未能自动定位 Turnstile 复选框，请在可见窗口中手动点击')
+    await setTurnstilePanelStatus(page, '自动验证未完成，请手动勾选上方“请验证您是真人”')
+    logger.warn(`[relay-checkin-plugin] Turnstile 自动操作未完成，请在可见窗口中手动点击${lastError ? `：${lastError}` : ''}`)
   }
   return false
 }
@@ -588,14 +700,15 @@ async function solveTurnstile(page, siteKey, timeoutSec, { interactive = false, 
           return false
         }
         if (!window.turnstile?.render) {
-          let script = document.querySelector('script[src*="challenges.cloudflare.com/turnstile/v0/api.js"]')
-          if (!script) {
-            script = document.createElement('script')
-            script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
-            script.async = true
-            script.defer = true
-            document.head.appendChild(script)
-          }
+          // 页面被 window.stop() 截断时可能残留一个永远不会完成的 script 标签。
+          // API 尚未就绪就移除残留并重新加载，避免继续等到总超时。
+          document.querySelectorAll('script[src*="challenges.cloudflare.com/turnstile/v0/api.js"]')
+            .forEach(script => script.remove())
+          const script = document.createElement('script')
+          script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
+          script.async = true
+          script.defer = true
+          document.head.appendChild(script)
           if (!await waitForApi()) {
             return { token: null, stage: 'script', reason: 'load-timeout' }
           }
@@ -716,10 +829,7 @@ async function runTurnstileAttempt(account, { checkinPath, headers, siteKey }, {
   const host = new URL(account.baseUrl).hostname
   return await withPage(host, async page => {
     await withTimeout(page.setBypassCSP(true), 15000, '设置 Turnstile 页面策略超时')
-    await withTimeout(
-      page.goto(account.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }),
-      40000, '打开站点页面超时（网络或代理不通）'
-    )
+    await navigateForTurnstile(page, account.baseUrl)
 
     const attempt = await solveTurnstile(page, siteKey, timeoutSec, { interactive, host })
     if (!attempt.token) {
@@ -730,6 +840,7 @@ async function runTurnstileAttempt(account, { checkinPath, headers, siteKey }, {
       }
     }
 
+    logger.info(`[relay-checkin-plugin] Turnstile ${interactive ? '可见' : '无头'}验证已签发 token，正在提交签到接口`)
     const url = new URL(checkinPath, `${account.baseUrl}/`)
     url.searchParams.set('turnstile', attempt.token)
     return await pageFetch(page, url.toString(), { method: 'POST', headers })
@@ -748,11 +859,14 @@ function boundedSeconds(value, fallback, min, max) {
 export function browserHangBudgetMs(browser = {}) {
   const slotSec = boundedSeconds(browser.slotWaitSec, 120, 30, 600)
   const quickSec = boundedSeconds(browser.turnstileTimeoutSec, 30, 5, 120)
-  const interactiveSec = browser.turnstileInteractive === false
+  const interactiveEnabled = browser.turnstileInteractive !== false
+  const interactiveSec = !interactiveEnabled
     ? 0
     : boundedSeconds(browser.turnstileInteractiveTimeoutSec, 120, 30, 600)
-  const executionSec = Math.max(300, quickSec + interactiveSec + 120)
-  return (slotSec + executionSec) * 1000
+  const phases = interactiveEnabled ? 2 : 1
+  // 每阶段 300 秒覆盖 launch/newPage/初始化/导航/接口提交/关闭的硬超时余量；
+  // 无头和可见阶段分别调用 withPage，繁忙时也可能各排队一次。
+  return (slotSec * phases + quickSec + interactiveSec + 300 * phases) * 1000
 }
 
 /**
@@ -768,11 +882,21 @@ export async function turnstileCheckin(account, { checkinPath, headers, siteKey 
   const quickTimeoutSec = boundedSeconds(cfg.browser.turnstileTimeoutSec, 30, 5, 120)
   const interactiveTimeoutSec = boundedSeconds(cfg.browser.turnstileInteractiveTimeoutSec, 120, 30, 600)
 
-  const quick = await runTurnstileAttempt(
-    account,
-    { checkinPath, headers, siteKey },
-    { interactive: false, timeoutSec: quickTimeoutSec }
-  )
+  let quick
+  try {
+    quick = await runTurnstileAttempt(
+      account,
+      { checkinPath, headers, siteKey },
+      { interactive: false, timeoutSec: quickTimeoutSec }
+    )
+  } catch (err) {
+    const detail = err?.message || String(err)
+    quick = {
+      turnstileFailed: true,
+      message: `无头浏览器阶段失败：${detail}`,
+      detail: { stage: 'headless-browser', reason: 'exception', detail }
+    }
+  }
   if (!quick.turnstileFailed) {
     noteResult(host, browserResultOk(quick))
     return quick

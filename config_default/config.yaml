@@ -47,7 +47,7 @@ browser:
   # Turnstile 无头快速尝试的最长时间（秒），范围 5~120；失败后不再无效刷新
   turnstileTimeoutSec: 30
   # 无头尝试失败后，是否在机器人运行设备上打开可见浏览器接管
-  # 可见窗口使用持久用户档案；Cloudflare 自动放行时无需操作，否则需人工完成一次验证
+  # 可见窗口使用持久用户档案并自动点击一次标准复选框；升级后的交互挑战仍需人工完成
   turnstileInteractive: true
   # 等待可见浏览器完成 Turnstile 的最长时间（秒），范围 30~600
   turnstileInteractiveTimeoutSec: 120

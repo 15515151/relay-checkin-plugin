@@ -93,7 +93,7 @@ function progressTip(accounts) {
 
 /**
  * 兜底防挂起：验证/签到流程无论卡在哪一层，都给出明确失败而不是永久静默。
- * 预算必须大于「排队等浏览器空闲」的上限，否则会出现「已告知用户超时失败、
+ * 预算必须大于两阶段「排队等浏览器空闲 + 浏览器执行」的上限，否则会出现「已告知用户超时失败、
  * 任务稍后拿到槽位却真的签到了」的自相矛盾结果
  */
 function hangBudgetMs() {
@@ -102,7 +102,7 @@ function hangBudgetMs() {
   } catch {
     // 取配置失败（如 data 目录不可写）不能让调用方同步抛出：
     // 那会导致已在飞行的请求 promise 无人接管，触发 unhandledRejection 退进程
-    return 420000
+    return 990000
   }
 }
 
@@ -112,7 +112,7 @@ function guardHang(promise, label, ms = hangBudgetMs()) {
     Promise.resolve(promise).finally(() => clearTimeout(timer)),
     new Promise((_, reject) => {
       timer = setTimeout(() => {
-        logger.error(`[relay-checkin-plugin] ${label} 超时（${ms / 1000}s），已中断`)
+        logger.error(`[relay-checkin-plugin] ${label} 超时（${ms / 1000}s），已停止等待结果`)
         reject(new Error(`${label}超时，请检查网络/代理后重试`))
       }, ms)
     })

@@ -7,7 +7,7 @@ TRSS-Yunzai 中转站自动签到插件（OneBot v11）。支持主流开源中�
 - 自动识别站点类型（new-api 令牌 / Veloera 令牌 / AnyRouter / AgentRouter / Cookie 通用）
 - 群内隐私绑定：群里只发 `#中转添加 地址`，令牌/session 私聊补发，超时/失败/成功都会引用原消息回群提示
 - 同一站点支持多个账号（按站点用户ID区分，同一账号重复添加只更新凭据）；添加/更新成功后自动签到一次，未签的顺带签上、已签的正确标记为今日已签
-- Cloudflare Turnstile 站点自动降级浏览器方案：页面内尝试完成非交互挑战，失败时记录具体阶段与错误码
+- Cloudflare Turnstile 站点自动降级浏览器方案：先无头尝试，再用持久可见浏览器自动点击标准复选框，升级挑战保留人工接管
 - 兼容部分 NewAPI 魔改站的网页 `X-Game-*` 完整性校验：服务端明确拒绝后补齐公开网页所用请求头再试一次
 - AnyRouter（anyrouter.top）支持：无头浏览器过阿里云 WAF 后页内签到
 - AgentRouter（agentrouter.org / *.air-outer.com）：支持重置站内密码后的邮箱登录签到，依据官方登录响应与余额变化确认 `$25`；旧 Cookie 模式仅验证 Session，不把保活误报为签到
@@ -109,7 +109,7 @@ AnyRouter 同理（`#中转添加cookie anyrouter.top <session值> <用户ID>`�
 
 - Turnstile 会先进行一次无头快速尝试；失败后默认打开持久档案的可见浏览器，并在同一页面、同一代理出口下取得 token 后立即提交。持久档案能保留浏览器信任状态，但不能保证 Cloudflare 每次自动放行
 - 要求交互时，需在机器人运行设备弹出的窗口内完成验证；Linux 服务器必须有可用的 `DISPLAY` 或 `WAYLAND_DISPLAY`。纯命令行服务器无法显示窗口时会立即返回明确错误，可在配置中关闭 `browser.turnstileInteractive`
-- 插件不自动点击或绕过 Turnstile，也不默认接入第三方打码服务，避免向外部服务泄露站点地址、访问上下文或账号相关信息。因此无人值守定时任务遇到必须人工交互的挑战时仍可能失败
+- 可见模式只对标准 Turnstile 复选框自动点击一次，不尝试绕过升级后的交互挑战，也不默认接入第三方打码服务，避免向外部服务泄露站点地址、访问上下文或账号相关信息。因此无人值守定时任务遇到必须人工完成的挑战时仍可能失败
 - AnyRouter 的 WAF 策略可能变化，若持续提示「WAF 未放行」可稍后重试或提 issue
 - anyrouter.top 国内网络无法直连（报「网络请求失败: fetch failed」即是），需在 `data/config.yaml` 配置 `proxy.url` 代理（复用 Yunzai 自带的 https-proxy-agent，无需额外安装）
 - Cookie 方式的 session 有效期约 1 个月，失效后需重新添加；AgentRouter 邮箱模式会自动保存每次登录返回的新 Session
