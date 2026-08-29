@@ -18,7 +18,8 @@
 - 新增 `#中转添加刷新令牌`：本机过不去码的站点可直接用浏览器抓的 token 绑定
 - **图形验证码自动识别**（ddddocr），答错自动换码重试
 - **Turnstile 改为断开调试连接后由页面自治过码** —— 实测 CDP 会话连着就必被判自动化
-- **无桌面 Linux 可无人值守过码**：自动拉 Xvfb + xdotool 真实指针勾选
+- **三个平台都能自动勾选**：Windows 走 PowerShell + user32 真实指针，有桌面的机器用本机指针，
+  无桌面 Linux 自动拉 Xvfb + xdotool
 - 失败留档（页内步骤日志、组件位置、指针落点、截图），并绕开 Puppeteer 13 吞掉 Chrome stderr 的问题
 - 浏览器档案占用自愈、锅巴配置面板、new-api 网页会话（`authMode: session`）支持
 
@@ -33,13 +34,19 @@ git clone --depth=1 https://gitcode.com/ccxhan/relay-checkin-plugin ./plugins/re
 
 重启即可，依赖蹭 Yunzai 自带的。
 
-### 无桌面服务器（推荐装）
+### 人机验证（Turnstile）的运行环境
 
-Turnstile 站点需要真实指针，装两个系统包就能无人值守：
+过码要在真实显示环境里用**系统级指针**勾选复选框（CDP 注入的点击一律被判自动化），
+各平台的准备工作不同：
 
-```bash
-apt install -y xvfb xdotool     # Debian / Ubuntu
-```
+| 系统 | 要装什么 | 说明 |
+| --- | --- | --- |
+| 无桌面 Linux | `apt install -y xvfb xdotool` | 自动拉虚拟屏，全程无人值守 |
+| 有桌面 Linux | `apt install -y xdotool` | 用本机桌面，勾选时会短暂占用鼠标 |
+| Windows 10 / 11 | 无需安装 | 用系统自带 PowerShell 调 user32 指针。要在**已登录的桌面会话**里跑 Yunzai，装成 Windows 服务会起不来浏览器 |
+| macOS | — | 没有免安装的指针工具，需要自己在弹出的窗口里点一下 |
+
+另外建议装最新的 Chrome 或 Edge，Turnstile 会拒绝过旧内核。
 
 ### 图形验证码（可选）
 
@@ -47,7 +54,8 @@ apt install -y xvfb xdotool     # Debian / Ubuntu
 
 ```bash
 cd plugins/relay-checkin-plugin
-python3 -m venv .venv && .venv/bin/pip install ddddocr
+python3 -m venv .venv && .venv/bin/pip install ddddocr   # Linux / macOS
+py -m venv .venv && .venv\Scripts\pip install ddddocr    # Windows
 ```
 
 ### 装在 Yunzai NG 上

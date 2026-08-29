@@ -367,6 +367,170 @@ try {
   assert.equal(clickedAfterManual, false, 'token 已生成后不得再点击验证控件')
   console.log('browser profile OK')
 
+  // ---- 跨平台原生能力：真实指针、窗口几何、进程表 ----
+  // Windows 分支只能在 Linux 上靠注入 platform / spawn 验证，无法真跑 PowerShell
+  const {
+    POINTER_WINDOWS,
+    pointerDisplayFor,
+    commandLineUsesProfile,
+    isOrphanProcess,
+    listProcesses,
+    killProcessTree,
+    parseShellGeometry,
+    parsePointerLocation,
+    pointerPath,
+    windowsClickCommand,
+    windowsWindowGeometryCommand
+  } = await import('../models/native.js')
+  const { detachedClickOrigin } = await import('../models/browser.js')
+
+  assert.equal(pointerDisplayFor(':99'), ':99', '自建虚拟屏优先')
+  assert.equal(
+    pointerDisplayFor(null, { platform: 'win32', env: {} }),
+    POINTER_WINDOWS,
+    'Windows 桌面本身就有真实指针，不该退化成人工勾选'
+  )
+  assert.equal(
+    pointerDisplayFor(null, { platform: 'linux', env: { DISPLAY: ':0' } }), ':0',
+    '有图形桌面的 Linux 应直接用本机 display'
+  )
+  assert.equal(pointerDisplayFor(null, { platform: 'linux', env: {} }), '', '无桌面且无虚拟屏只能手动点')
+  assert.equal(pointerDisplayFor(null, { platform: 'darwin', env: {} }), '', 'macOS 没有可用的原生指针工具')
+
+  // Windows 的命令行会给含空格的路径加引号，分隔符与大小写也都不固定
+  const winProfile = 'C:\\Users\\Bot 1\\Yunzai\\data\\browser-profile\\abc123'
+  assert.equal(
+    commandLineUsesProfile(`chrome.exe --user-data-dir="${winProfile}" --no-first-run`, winProfile, 'win32'),
+    true, '带引号的 Windows 档案路径应能匹配'
+  )
+  assert.equal(
+    commandLineUsesProfile('chrome.exe --user-data-dir=c:/users/bot 1/yunzai/data/browser-profile/abc123', winProfile, 'win32'),
+    false, '不带引号时空格截断即视为不同路径，宁可漏杀也不能误杀'
+  )
+  assert.equal(
+    commandLineUsesProfile(`chrome.exe --user-data-dir="${winProfile.toUpperCase()}"`, winProfile, 'win32'),
+    true, 'Windows 路径比较必须忽略大小写'
+  )
+  assert.equal(
+    commandLineUsesProfile('chrome --user-data-dir=/data/browser-profile/abc123x', '/data/browser-profile/abc123', 'linux'),
+    false, '前缀相同的另一个目录不应被当成同一档案'
+  )
+  assert.equal(
+    commandLineUsesProfile('chrome --user-data-dir=/data/browser-profile/abc123 --lang=zh-CN', '/data/browser-profile/abc123', 'linux'),
+    true, 'Linux 档案路径应正常匹配'
+  )
+
+  // 孤儿判据：Linux 看 ppid 是否被 init 收养，Windows 看父进程还在不在
+  assert.equal(isOrphanProcess({ pid: 20, ppid: 1 }, null, 'linux'), true)
+  assert.equal(isOrphanProcess({ pid: 20, ppid: 300 }, null, 'linux'), false)
+  assert.equal(isOrphanProcess({ pid: 20, ppid: 300 }, new Set([20]), 'win32'), true, 'Windows 上父进程已消失即为孤儿')
+  assert.equal(isOrphanProcess({ pid: 20, ppid: 300 }, new Set([20, 300]), 'win32'), false)
+
+  // Windows 进程表：必须走 EncodedCommand（PowerShell 5.1 会吞掉命令行里的双引号）
+  let psInvocation = null
+  const winProcesses = listProcesses({
+    platform: 'win32',
+    spawn: (command, args) => {
+      psInvocation = { command, args }
+      return { status: 0, stdout: '4321\t900\tchrome.exe --user-data-dir="C:\\p 1"\r\n8\t0\t\r\nbad line\r\n' }
+    }
+  })
+  assert.match(psInvocation.command, /^(powershell|pwsh)\.exe$/)
+  const encodedIndex = psInvocation.args.indexOf('-EncodedCommand')
+  assert.ok(encodedIndex > 0, 'Windows 进程表查询必须用 -EncodedCommand 传递')
+  const decodedCommand = Buffer.from(psInvocation.args[encodedIndex + 1], 'base64').toString('utf16le')
+  assert.ok(decodedCommand.includes('Win32_Process'), '应通过 CIM 查询进程表')
+  assert.ok(decodedCommand.includes('OutputEncoding'), '必须显式设成 UTF-8，否则中文路径会乱码')
+  assert.deepEqual(
+    winProcesses,
+    [
+      { pid: 4321, ppid: 900, command: 'chrome.exe --user-data-dir="C:\\p 1"' },
+      { pid: 8, ppid: 0, command: '' }
+    ],
+    '制表符分隔的进程表应逐行解析，非法行跳过'
+  )
+
+  // Windows 上只杀主进程会留下渲染子进程继续占着档案目录，必须 taskkill /T
+  let killArgs = null
+  assert.equal(killProcessTree(4321, {
+    platform: 'win32',
+    spawn: (command, args) => {
+      killArgs = { command, args }
+      return { status: 0 }
+    }
+  }), true)
+  assert.deepEqual(killArgs, { command: 'taskkill', args: ['/F', '/T', '/PID', '4321'] })
+
+  // 点击脚本：轨迹终点必须精确落在目标上，且按下与抬起成对、顺序不能反
+  const trail = pointerPath(400, 300)
+  assert.equal(trail.length, 6)
+  assert.deepEqual([trail.at(-1).x, trail.at(-1).y], [400, 300], '最后一步不许抖动，必须落在目标点')
+  assert.ok(trail.every(step => step.delayMs >= 30 && step.delayMs < 80), '每步之间要有停顿')
+  const clickScript = windowsClickCommand(270, 332, '65552')
+  assert.ok(clickScript.includes('[void][RelayNative]::SetCursorPos(270, 332)'), '指针必须停在目标坐标')
+  assert.ok(clickScript.includes('$hwnd = [IntPtr]65552'), '传了窗口句柄就要先把窗口抬到最前')
+  assert.ok(
+    clickScript.indexOf('mouse_event(0x0002') < clickScript.indexOf('mouse_event(0x0004'),
+    '必须先按下再抬起'
+  )
+  // 注意 user32 声明块里本来就有 SetForegroundWindow 这个名字，要按「有没有调用」判断
+  assert.ok(clickScript.includes('::SetForegroundWindow($hwnd)'), '并发多窗口时不抬窗会点到别的窗口上')
+  assert.ok(!windowsClickCommand(10, 20).includes('::SetForegroundWindow('), '没有句柄时不该抬窗')
+
+  // 两个平台的几何输出统一成 KEY=数值，于是共用同一套解析
+  assert.deepEqual(
+    parseShellGeometry('WINDOW=65552\nX=10\nY=10\nWIDTH=1600\nHEIGHT=1000\n'),
+    { windowId: '65552', x: 10, y: 10, width: 1600, height: 1000 }
+  )
+  assert.deepEqual(
+    parseShellGeometry('WINDOW=1\nX=0\nY=0\nWIDTH=800\nHEIGHT=600\nWINDOW=2\nX=5\nY=6\nWIDTH=900\nHEIGHT=700\n'),
+    { windowId: '2', x: 5, y: 6, width: 900, height: 700 },
+    '匹配到多个窗口时取最后一组'
+  )
+  assert.equal(parseShellGeometry('WINDOW=1\n'), null, '缺尺寸时应判为取不到')
+  assert.equal(parsePointerLocation('X=270\nY=332\nSCREEN=0\n'), '(270, 332)')
+  assert.equal(parsePointerLocation('nothing'), '')
+  const geometryScript = windowsWindowGeometryCommand('relay-checkin kktoken.cc')
+  assert.ok(geometryScript.includes("-like '*relay-checkin kktoken.cc*'"), '按窗口标题子串匹配')
+  assert.ok(
+    geometryScript.includes('GetClientRect') && geometryScript.includes('ClientToScreen'),
+    'Windows 侧要返回客户区矩形的屏幕坐标'
+  )
+
+  // Windows 返回客户区（frameW≈0，frameH=标签栏+地址栏）；Linux 返回窗口外框（左右各半边框）
+  assert.deepEqual(
+    detachedClickOrigin(
+      { innerWidth: 1600, innerHeight: 912 },
+      { windowId: '65552', x: 8, y: 31, width: 1600, height: 1000 }
+    ),
+    { x: 8, y: 119 },
+    'Windows 客户区几何应算出视口原点'
+  )
+  assert.equal(
+    detachedClickOrigin({ innerWidth: 1600, innerHeight: 912 }, { x: 0, y: 0, width: 1600, height: 1500 }),
+    null,
+    '边框高得离谱说明找错了窗口，应退回页面自报'
+  )
+  console.log('原生指针 / 进程表 OK')
+
+  // ---- OCR 解释器解析（Windows 的应用商店存根会让 OCR 永远超时）----
+  const { findWindowsPython } = await import('../models/ocr.js')
+  // PATH 用 Windows 的分号分隔（findWindowsPython 写死分号，正是为了能在这里测）
+  const winPath = [
+    'C:\\Users\\Bot\\AppData\\Local\\Microsoft\\WindowsApps',
+    'C:\\Python312'
+  ].join(';')
+  assert.equal(
+    findWindowsPython({ PATH: winPath }, candidate => candidate.includes('WindowsApps') || candidate.includes('Python312')),
+    path.join('C:\\Python312', 'python.exe'),
+    '必须跳过 WindowsApps 里的应用商店存根'
+  )
+  assert.equal(
+    findWindowsPython({ PATH: winPath }, () => false), 'py',
+    'PATH 里没有可用解释器时交给 py launcher'
+  )
+  console.log('OCR 解释器解析 OK')
+
   // ---- adapters/common ----
   const { quotaToUsd, parseUserInfo, parseCheckinResult, classifyValidation, deriveAwardQuota, matchProxy } = await import('../models/adapters/common.js')
   // 代理域名匹配：hosts 关键字包含匹配；空数组 = 全部走代理；未配置 url = 不走

@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+import { killProcessTree } from './native.js'
 
 const pluginDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const scriptPath = path.join(pluginDir, 'scripts', 'ocr_captcha.py')
@@ -22,7 +23,33 @@ function resolvePython() {
   for (const p of candidates) {
     if (existsSync(p)) return p
   }
-  return process.platform === 'win32' ? 'python' : 'python3'
+  return process.platform === 'win32' ? findWindowsPython() : 'python3'
+}
+
+/**
+ * Windows 上 PATH 里的 python.exe 很可能是「应用商店存根」——微软放在
+ * %LOCALAPPDATA%\\Microsoft\\WindowsApps 下的占位文件，执行它只会弹出商店页面、
+ * 永不返回，表现为每次 OCR 都超时。所以自己遍历 PATH 跳过存根，
+ * 都没有才交给 py launcher（官方安装包写进 System32，知道所有已注册的 Python）。
+ */
+export function findWindowsPython(env = process.env, exists = candidate => {
+  try {
+    const stat = statSync(candidate)
+    return stat.isFile() && stat.size > 0
+  } catch {
+    return false
+  }
+}) {
+  // Windows 的 PATH 分隔符恒为分号；写死而不用 path.delimiter，
+  // 才能在别的平台上对这段逻辑做测试（那边的分隔符是冒号，会把盘符切开）
+  for (const dir of String(env.PATH || env.Path || '').split(';').filter(Boolean)) {
+    if (/WindowsApps/i.test(dir)) continue
+    for (const name of ['python.exe', 'python3.exe']) {
+      const candidate = path.join(dir, name)
+      if (exists(candidate)) return candidate
+    }
+  }
+  return 'py'
 }
 
 // ddddocr 首次调用要加载两个 onnx 模型，正常几秒内出结果。
@@ -70,8 +97,10 @@ export function ocrCaptcha(image, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
 
     // unref 避免超时后的定时器把 Yunzai 进程留在事件循环里
     const timer = setTimeout(() => {
-      // SIGKILL 而非 SIGTERM：卡在 onnxruntime 初始化的 python 可能不响应 TERM
-      child.kill('SIGKILL')
+      // SIGKILL 而非 SIGTERM：卡在 onnxruntime 初始化的 python 可能不响应 TERM。
+      // 走进程树是因为 Windows 上解释器可能是 py launcher，它真正干活的
+      // python.exe 是子进程，只杀 launcher 会留下一个吃着内存的孤儿
+      killProcessTree(child.pid)
       fail(new Error(`OCR 超时（${timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} 秒` : `${timeoutMs} 毫秒`}未返回，已终止 python 进程）`))
     }, timeoutMs)
     timer.unref?.()
@@ -80,7 +109,9 @@ export function ocrCaptcha(image, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
     child.stderr.on('data', chunk => { err += chunk })
     child.on('error', e => {
       fail(e?.code === 'ENOENT'
-        ? new Error(`找不到 python 解释器 ${python}，请安装 python3 或用环境变量 RELAY_CHECKIN_PYTHON 指定路径`)
+        ? new Error(`找不到 python 解释器 ${python}，${process.platform === 'win32'
+          ? '请安装 Python 并勾选 Add to PATH'
+          : '请安装 python3'}，或用环境变量 RELAY_CHECKIN_PYTHON 指定路径`)
         : e)
     })
     child.on('close', code => {

@@ -6,6 +6,21 @@ import { dataPath, getConfig } from './config.js'
 import { logger } from '../host/index.js'
 import { proxyForHost } from './adapters/common.js'
 import { assertSafeRequestUrl } from './url-security.js'
+import {
+  POINTER_WINDOWS,
+  commandLineUsesProfile,
+  isOrphanProcess,
+  killProcessTree,
+  listProcesses,
+  nativeClick,
+  nativeMouseLocation,
+  nativePointerUnavailable,
+  nativeWindowGeometry,
+  pointerDisplayFor
+} from './native.js'
+
+// 真实指针相关的平台差异都在 models/native.js，这里只保留原有导出名以免调用方跟着改
+export { pointerDisplayFor }
 
 /**
  * 浏览器工具：用于过阿里云 WAF（AnyRouter 系）、Cloudflare Turnstile 与 NewAPI POW 挑战。
@@ -308,6 +323,7 @@ async function getBrowser(pool, proxy, { interactive = false, profileKey = '', e
       if (interactive && process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
         virtualDisplay = await ensureVirtualDisplay()
       }
+      if (interactive) warnWindowsHeadlessSession()
       const puppeteer = await getPuppeteer()
       const args = [
         '--no-sandbox',
@@ -1233,7 +1249,7 @@ export async function autoClickTurnstileCheckbox(page, timeoutSec, shouldStop) {
         const dwellMs = 3500 + Math.floor(Math.random() * 3000)
         await new Promise(resolve => setTimeout(resolve, dwellMs))
         if (shouldStop()) return false
-        let how = 'xdotool 真实指针'
+        let how = '系统真实指针'
         if (!await nativePointerClick(page, target)) {
           how = 'CDP 注入事件'
           const startX = Math.max(1, target.x - 90)
@@ -1267,70 +1283,13 @@ export async function autoClickTurnstileCheckbox(page, timeoutSec, shouldStop) {
 }
 
 /**
- * 虚拟屏上用真实指针点击。CDP 的 Input.dispatchMouseEvent 是注入事件，
- * Cloudflare 能从「没有任何 OS 级原始输入」认出自动化（实测回 600010 检测到 bot 行为）；
- * 有 Xvfb 时改用 xdotool 驱动 X server 自己的指针，事件路径与真人完全一致。
- * xdotool 缺失或调用失败返回 false，由调用方退回 CDP 点击。
+ * 附着模式下用真实指针点击：先问页面自己在屏幕上的位置，再把视口坐标换算成屏幕坐标。
+ * 平台差异（xdotool / PowerShell）在 models/native.js 里，取不到指针时返回 false，
+ * 由调用方退回 CDP 点击。
  */
-let nativeClickUnavailable = false
-
-/**
- * 用 xdotool 在指定 display 上把真实指针移到屏幕坐标并点击。
- * @returns {Promise<boolean>} 点击是否成功执行
- */
-export function xdotoolClick(display, x, y, { windowId = '' } = {}) {
-  if (!display || nativeClickUnavailable) return Promise.resolve(false)
-  const argv = []
-  // 同一虚拟屏上可能同时开着别的窗口（并发签到、常驻可见实例），它们都在 (0,0)
-  // 互相遮挡；先把目标窗口抬到最前，屏幕坐标点击才会落到它身上。
-  // windowraise 直接调 XRaiseWindow，不需要窗口管理器
-  if (windowId) argv.push('windowraise', windowId, 'sleep', '0.20')
-  const steps = 6
-  const fromX = x - 120 - Math.floor(Math.random() * 60)
-  const fromY = y + 70 + Math.floor(Math.random() * 40)
-  for (let i = 1; i <= steps; i++) {
-    const t = i / steps
-    const jitter = i < steps ? () => Math.round(Math.random() * 6 - 3) : () => 0
-    argv.push(
-      'mousemove',
-      String(Math.round(fromX + (x - fromX) * t) + jitter()),
-      String(Math.round(fromY + (y - fromY) * t) + jitter()),
-      'sleep', (0.03 + Math.random() * 0.05).toFixed(3)
-    )
-  }
-  // 指针到位后再停顿一下才按下，避免「移动即点击」的机械特征
-  argv.push('sleep', (0.25 + Math.random() * 0.35).toFixed(3), 'click', '1')
-
-  return new Promise(resolve => {
-    let settled = false
-    const finish = value => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      resolve(value)
-    }
-    const proc = spawn('xdotool', argv, {
-      env: { ...process.env, DISPLAY: display },
-      stdio: 'ignore'
-    })
-    const timer = setTimeout(() => {
-      try { proc.kill() } catch { /* 已退出 */ }
-      finish(false)
-    }, 15000)
-    proc.once('error', err => {
-      if (err?.code === 'ENOENT') {
-        nativeClickUnavailable = true
-        logger.warn('[relay-checkin-plugin] 未安装 xdotool，无法在虚拟屏上自动勾选人机验证（建议执行 apt install xdotool）')
-      }
-      finish(false)
-    })
-    proc.once('exit', code => finish(code === 0))
-  })
-}
-
 async function nativePointerClick(page, target) {
   const display = pointerDisplayFor(xvfbProc?.display)
-  if (!display || nativeClickUnavailable) return false
+  if (!display || nativePointerUnavailable()) return false
   let geom = null
   try {
     geom = await withTimeout(page.evaluate(() => ({
@@ -1342,13 +1301,14 @@ async function nativePointerClick(page, target) {
   } catch {
     return false
   }
-  return await xdotoolClick(display, ...viewportToScreen(geom, target.x, target.y))
+  return await nativeClick(display, ...viewportToScreen(geom, target.x, target.y))
 }
 
 /**
  * 视口坐标 → 屏幕坐标：窗口位置 + 左右边框的一半 + 标签栏/地址栏高度。
  * 实测（Xvfb 1920x1080 + Chrome 147）换算误差为 0。
- */function viewportToScreen(geom, x, y) {
+ */
+function viewportToScreen(geom, x, y) {
   return [
     Math.round(geom.screenX + Math.max(0, geom.frameW / 2) + x),
     Math.round(geom.screenY + Math.max(0, geom.frameH) + y)
@@ -1356,72 +1316,12 @@ async function nativePointerClick(page, target) {
 }
 
 /**
- * 决定 xdotool 该在哪个 display 上驱动指针。
- *
- * 机器本身有图形桌面时不会去起 Xvfb（ensureVirtualDisplay 直接返回 null），但那台机器
- * 的桌面同样有真实指针可用——以前这种情况一律要求用户自己动手点，其实没必要。
- * Wayland 桌面只有在 XWayland 也开着（DISPLAY 存在）时才驱动得动，此时要让 Chrome 走 X11。
- * @param {string|null} virtualDisplay 本插件自己拉起的 Xvfb display
- * @returns {string} 可用于 xdotool 的 display，空串表示只能手动点
- */
-export function pointerDisplayFor(virtualDisplay) {
-  if (virtualDisplay) return virtualDisplay
-  if (process.platform !== 'linux') return ''
-  return process.env.DISPLAY || ''
-}
-
-/**
- * 用 xdotool 问 X server 要窗口的真实几何与窗口 id。
- *
- * Chrome 自报的 outerHeight - innerHeight 在没有窗口管理器的 Xvfb 上并不可靠
- * （不同大版本行为不一致，为 0 时算出的点击点会整体偏上，正好落在提示文字上——
- * 于是「点了却毫无反应」，Turnstile 连 error-callback 都不会触发）。X server 的数据不会骗人。
- * @returns {Promise<{windowId:string,x:number,y:number,width:number,height:number}|null>}
- */
-export function xdotoolWindowGeometry(display, title) {
-  if (!display || nativeClickUnavailable) return Promise.resolve(null)
-  return new Promise(resolve => {
-    let proc = null
-    try {
-      proc = spawn('xdotool', ['search', '--onlyvisible', '--name', title, 'getwindowgeometry', '--shell'], {
-        env: { ...process.env, DISPLAY: display },
-        stdio: ['ignore', 'pipe', 'ignore']
-      })
-    } catch {
-      resolve(null)
-      return
-    }
-    let out = ''
-    let settled = false
-    const finish = value => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      try { proc.kill() } catch { /* 已退出 */ }
-      resolve(value)
-    }
-    const timer = setTimeout(() => finish(null), 8000)
-    proc.stdout.on('data', chunk => { out += String(chunk) })
-    proc.once('error', () => finish(null))
-    proc.once('exit', () => {
-      // 匹配到多个窗口时 xdotool 会按窗口依次输出各自的 WINDOW/X/Y/WIDTH/HEIGHT，取最后一组
-      const pick = key => {
-        const all = [...out.matchAll(new RegExp(`^${key}=(-?\\d+)$`, 'gm'))]
-        return all.length ? Number(all.at(-1)[1]) : null
-      }
-      const width = pick('WIDTH')
-      const height = pick('HEIGHT')
-      const windowId = pick('WINDOW')
-      finish(width && height
-        ? { windowId: windowId ? String(windowId) : '', x: pick('X') || 0, y: pick('Y') || 0, width, height }
-        : null)
-    })
-  })
-}
-
-/**
- * 用 X server 实测的窗口几何 + 页面自报的视口尺寸，算出视口原点的屏幕坐标。
+ * 用系统实测的窗口几何 + 页面自报的视口尺寸，算出视口原点的屏幕坐标。
  * 数据不全或明显不合理时返回 null，由调用方退回 Chrome 自报的换算。
+ *
+ * 两个平台给的矩形不同，但都能套进同一个算式：Linux 给窗口外框（于是左右各有一半边框，
+ * frameW 才要除以 2），Windows 给客户区（左边就是视口左边，frameW 约为 0，
+ * frameH 正好是标签栏 + 地址栏的高度）。
  */
 export function detachedClickOrigin(geom, windowGeom) {
   if (!windowGeom || !geom?.innerHeight || !geom?.innerWidth) return null
@@ -1430,6 +1330,31 @@ export function detachedClickOrigin(geom, windowGeom) {
   // 标签栏 + 地址栏在 200px 以内才算可信；超出说明找到的不是那个窗口
   if (frameH < 0 || frameH > 200) return null
   return { x: windowGeom.x + frameW, y: windowGeom.y + frameH }
+}
+
+/**
+ * 日志里怎么描述当前的指针环境：Windows 的 display 是个哨兵值，原样打出来没人看得懂。
+ */
+function describePointerEnv(virtualDisplay, pointerDisplay) {
+  if (virtualDisplay) return `虚拟屏 ${virtualDisplay}`
+  const occupies = '（勾选时会短暂占用鼠标指针）'
+  return pointerDisplay === POINTER_WINDOWS
+    ? `Windows 桌面${occupies}`
+    : `本机桌面 ${pointerDisplay}${occupies}`
+}
+
+let warnedWindowsSession = false
+
+/**
+ * Windows 上把 Yunzai 跑成服务或计划任务（session 0）时没有交互式桌面：
+ * 有头 Chrome 起不来、真实指针也无处可点，可用户看到的只是一句「浏览器启动超时」。
+ * SESSIONNAME（Console / RDP-Tcp#n）是判断交互式会话最便宜的启发式，只提醒不阻断。
+ */
+function warnWindowsHeadlessSession() {
+  if (warnedWindowsSession || process.platform !== 'win32' || process.env.SESSIONNAME) return
+  warnedWindowsSession = true
+  logger.warn('[relay-checkin-plugin] 当前进程似乎不在 Windows 交互式桌面会话中（SESSIONNAME 为空）：'
+    + '人机验证需要真实桌面，作为服务运行时浏览器会起不来，建议在已登录的用户下启动 Yunzai')
 }
 
 async function turnstileRetrySequence(page) {  return await withTimeout(
@@ -1799,32 +1724,20 @@ const waitMs = ms => new Promise(resolve => setTimeout(resolve, ms))
  * stderr 却在进程 exit 时就 reject，那行输出往往还没被读到，于是只剩一句
  * "Failed to launch the browser process!"，无从判断原因。所以这里自己找持有者。
  * @param {string} userDataDir 档案目录
- * @param {boolean} orphanOnly 只算父进程已消失的（pm2 restart / 崩溃留下的孤儿）
+ * @param {boolean} orphanOnly 只算拉起它的进程已经消失的（pm2 restart / 崩溃留下的孤儿）
  */
-export function profileHolderPids(userDataDir, { orphanOnly = false } = {}) {
-  if (process.platform === 'win32') return []
-  try {
-    const out = spawnSync('ps', ['-eo', 'pid=,ppid=,args='], { encoding: 'utf8', timeout: 5000 })
-    if (out.status !== 0 || !out.stdout) return []
-    const needle = `--user-data-dir=${userDataDir}`
-    const pids = []
-    for (const line of out.stdout.split('\n')) {
-      const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/)
-      if (!m) continue
-      const pid = Number(m[1])
-      if (pid === process.pid) continue
-      if (orphanOnly && m[2] !== '1') continue
-      // 目录末段是内容哈希，不会与别的路径互为前缀；后面紧跟空格或行尾才算同一目录
-      const idx = m[3].indexOf(needle)
-      if (idx < 0) continue
-      const next = m[3][idx + needle.length]
-      if (next && next !== ' ') continue
-      pids.push(pid)
-    }
-    return pids
-  } catch {
-    return []
+export function profileHolderPids(userDataDir, { orphanOnly = false, platform = process.platform } = {}) {
+  const processes = listProcesses({ platform })
+  if (!processes.length) return []
+  const alive = orphanOnly ? new Set(processes.map(item => item.pid)) : null
+  const pids = []
+  for (const item of processes) {
+    if (item.pid === process.pid) continue
+    if (orphanOnly && !isOrphanProcess(item, alive, platform)) continue
+    if (!commandLineUsesProfile(item.command, userDataDir, platform)) continue
+    pids.push(item.pid)
   }
+  return pids
 }
 
 /**
@@ -1835,10 +1748,7 @@ export function profileHolderPids(userDataDir, { orphanOnly = false } = {}) {
 export function reapProfileHolders(userDataDir, { orphanOnly = false, label = '浏览器' } = {}) {
   let killed = 0
   for (const pid of profileHolderPids(userDataDir, { orphanOnly })) {
-    try {
-      process.kill(pid, 'SIGKILL')
-      killed++
-    } catch { /* 已退出或无权限 */ }
+    if (killProcessTree(pid)) killed++
   }
   if (killed) {
     logger.info(`[relay-checkin-plugin] 已清理占用${label}档案的残留进程（${killed} 个）：`
@@ -1884,42 +1794,8 @@ async function closeDetachedBrowser(ws, proc) {
     await withTimeout(browser.close(), 15000, '关闭浏览器超时')
     return
   } catch { /* 连不上就直接杀进程 */ }
-  try { proc?.kill('SIGKILL') } catch { /* 已退出 */ }
-}
-
-/**
- * 读虚拟屏上指针的最终落点。点击「执行成功」但页面毫无反应时，
- * 这一个坐标就能区分「点歪了」和「点对了但组件没反应」。
- */
-function xdotoolMouseLocation(display) {
-  if (!display || nativeClickUnavailable) return Promise.resolve('')
-  return new Promise(resolve => {
-    let proc = null
-    try {
-      proc = spawn('xdotool', ['getmouselocation', '--shell'], {
-        env: { ...process.env, DISPLAY: display },
-        stdio: ['ignore', 'pipe', 'ignore']
-      })
-    } catch {
-      resolve('')
-      return
-    }
-    let out = ''
-    let settled = false
-    const finish = () => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      try { proc.kill() } catch { /* 已退出 */ }
-      const x = out.match(/^X=(-?\d+)$/m)?.[1]
-      const y = out.match(/^Y=(-?\d+)$/m)?.[1]
-      resolve(x && y ? `(${x}, ${y})` : '')
-    }
-    const timer = setTimeout(finish, 5000)
-    proc.stdout.on('data', chunk => { out += String(chunk) })
-    proc.once('error', finish)
-    proc.once('exit', finish)
-  })
+  // 连整棵进程树一起收：只杀主进程会留下渲染子进程继续占着一次性档案目录
+  if (proc?.pid) killProcessTree(proc.pid)
 }
 
 /**
@@ -1958,7 +1834,7 @@ export async function dumpDetachedFailure(ws, host, display) {
       }
     }), 15000, '读取验证现场超时')
 
-    const mouse = await xdotoolMouseLocation(display)
+    const mouse = await nativeMouseLocation(display)
     logger.warn(`[relay-checkin-plugin] ${host} 验证现场: 挑战轮次=${snapshot.round}`
       + `｜页面步骤=[${snapshot.steps.join(' → ') || '无'}]`
       + `｜Turnstile 组件=${snapshot.iframe}｜token 长度=${snapshot.tokenLen}`
@@ -2015,9 +1891,12 @@ export function probeChromeLaunchStderr(executablePath, args, env) {
     }
     let proc = null
     try {
+      const probeArgs = [...args, '--remote-debugging-port=0', 'about:blank']
+      // Windows 上 Chrome 默认什么都不往 stderr 写，不显式打开日志就永远探不到原因
+      if (process.platform === 'win32') probeArgs.unshift('--enable-logging=stderr', '--log-level=0')
       // 独立进程组：Chrome 真起来了要连渲染子进程一起收掉，否则探测自己就变成新的占用者
-      proc = spawn(executablePath, [...args, '--remote-debugging-port=0', 'about:blank'], {
-        stdio: ['ignore', 'ignore', 'pipe'], env, detached: true
+      proc = spawn(executablePath, probeArgs, {
+        stdio: ['ignore', 'ignore', 'pipe'], env, detached: true, windowsHide: true
       })
     } catch (err) {
       resolve(String(err?.message || err))
@@ -2029,9 +1908,10 @@ export function probeChromeLaunchStderr(executablePath, args, env) {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      try { process.kill(-proc.pid, 'SIGKILL') } catch {
-        try { proc.kill('SIGKILL') } catch { /* 已退出 */ }
-      }
+      // Chrome 真起来了要连渲染子进程一起收掉，否则探测自己就变成新的档案占用者。
+      // Linux 上探测进程独占一个进程组，负 pid 一次收整组；Windows 没有进程组信号，
+      // 交给 killProcessTree 里的 taskkill /T
+      try { process.kill(-proc.pid, 'SIGKILL') } catch { killProcessTree(proc.pid) }
       const lines = text.split('\n').map(item => item.trim()).filter(Boolean)
       resolve(
         lines.find(item => !item.startsWith('[') && !item.startsWith('DevTools listening'))
@@ -2094,10 +1974,11 @@ export async function launchDetachedBrowser(puppeteer, launchOptions, { host, ex
  * Turnstile 一律回 600010（检测到 bot 行为）——出口 IP、UA、stealth 脚本、点击方式都不是主因；
  * 一旦 browser.disconnect()，同样的页面立刻签发 token。所以这里把流程拆成三段：
  * ① attach 状态下注入自治脚本并导航（此时还没有挑战在跑）；
- * ② 断开 CDP，用 xdotool 驱动真实指针点复选框，页面自己完成挑战并提交签到；
+ * ② 断开 CDP，用系统级真实指针点复选框，页面自己完成挑战并提交签到；
  * ③ 挑战结束后重连 CDP 取回结果。
  *
- * 无虚拟屏/无 xdotool 时不自动点击，退化为「用户在弹出的窗口里手动勾选」。
+ * 没有可用指针（macOS、缺 xdotool / PowerShell）时不自动点击，
+ * 退化为「用户在弹出的窗口里手动勾选」。
  */
 async function detachedTurnstileCheckin(account, { checkinPath, headers, validationHeaders, siteKey }, timeoutSec) {
   const cfg = getConfig()
@@ -2113,6 +1994,7 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
   try {
     const display = await ensureVirtualDisplay()
     const pointerDisplay = pointerDisplayFor(display)
+    warnWindowsHeadlessSession()
     const puppeteer = await getPuppeteer()
     const proxy = parseProxy(proxyForHost(host, true))
     const executablePath = resolveBrowserExecutable(cfg.browser.executablePath)
@@ -2191,19 +2073,19 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
 
     const viewX = DETACHED_WIDGET.left + DETACHED_WIDGET.boxX
     const viewY = DETACHED_WIDGET.top + DETACHED_WIDGET.boxY
-    // 断开 CDP 后再问 X server 要窗口几何：这是唯一不依赖 Chrome 自报数据的坐标来源
-    const windowGeom = await xdotoolWindowGeometry(pointerDisplay, `relay-checkin ${host}`)
+    // 断开 CDP 后再问系统要窗口几何：这是唯一不依赖 Chrome 自报数据的坐标来源
+    const windowGeom = await nativeWindowGeometry(pointerDisplay, `relay-checkin ${host}`)
     const origin = detachedClickOrigin(geom, windowGeom)
     const [boxX, boxY] = origin
       ? [origin.x + viewX, origin.y + viewY]
       : (geom ? viewportToScreen(geom, viewX, viewY) : [viewX, viewY])
-    const autoClick = Boolean(pointerDisplay) && !nativeClickUnavailable
+    const autoClick = Boolean(pointerDisplay) && !nativePointerUnavailable()
     logger.info(`[relay-checkin-plugin] ${host} 已断开调试连接进入人机验证，`
       + `${autoClick ? '将自动勾选复选框' : '请在弹出的浏览器窗口中手动勾选'}（最多 ${timeoutSec} 秒）`)
     if (autoClick) {
       logger.info(`[relay-checkin-plugin] 复选框屏幕坐标 (${boxX}, ${boxY})｜`
-        + `显示环境: ${display ? `虚拟屏 ${display}` : `本机桌面 ${pointerDisplay}（勾选时会短暂占用鼠标指针）`}｜`
-        + `依据: ${origin ? `X server 实测窗口 ${windowGeom.width}x${windowGeom.height} @(${windowGeom.x},${windowGeom.y})` : '页面自报（xdotool 未取到窗口几何）'}｜`
+        + `显示环境: ${describePointerEnv(display, pointerDisplay)}｜`
+        + `依据: ${origin ? `系统实测窗口 ${windowGeom.width}x${windowGeom.height} @(${windowGeom.x},${windowGeom.y})` : '页面自报（系统未给出窗口几何）'}｜`
         + `页面 inner ${geom?.innerWidth}x${geom?.innerHeight} outer ${geom?.outerWidth}x${geom?.outerHeight}`)
     }
 
@@ -2218,9 +2100,9 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
         // 组件渲染完还要「像人一样」停一会儿再点：立刻点击本身就是行为特征。
         // 首轮还要留出 api.js 加载 + render 的时间，点在未就绪的组件上会直接判失败。
         await waitMs((clickedRound === 0 ? 6000 : 3500) + Math.floor(Math.random() * 3000))
-        if (await xdotoolClick(pointerDisplay, boxX, boxY, { windowId: windowGeom?.windowId })) {
+        if (await nativeClick(pointerDisplay, boxX, boxY, { windowId: windowGeom?.windowId })) {
           clickedRound = round
-          logger.info(`[relay-checkin-plugin] 已用 xdotool 点击 ${host} 的验证复选框（第 ${round} 次挑战）`)
+          logger.info(`[relay-checkin-plugin] 已用系统指针点击 ${host} 的验证复选框（第 ${round} 次挑战）`)
         }
       }
       // 探测要重连 CDP，attach 本身会让正在进行的挑战被判 bot，所以第一次探测
@@ -2490,19 +2372,14 @@ async function waitForXSocket(num, timeoutMs = 3000) {
  * 会白占几百 MB 内存并把显示号耗光。只匹配本插件的固定参数，不动别人（含 xvfb-run）的实例。
  */
 function reapOrphanXvfb() {
-  try {
-    const out = spawnSync('ps', ['-eo', 'pid=,ppid=,args='], { encoding: 'utf8', timeout: 5000 })
-    if (out.status !== 0 || !out.stdout) return
-    for (const line of out.stdout.split('\n')) {
-      const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/)
-      if (!m || m[2] !== '1') continue
-      if (!m[3].startsWith(`Xvfb -displayfd 1 -screen 0 ${XVFB_SCREEN}`)) continue
-      try {
-        process.kill(Number(m[1]), 'SIGTERM')
-        logger.info(`[relay-checkin-plugin] 已回收上次运行残留的虚拟显示进程（pid ${m[1]}）`)
-      } catch { /* 已退出或无权限 */ }
-    }
-  } catch { /* 拿不到进程列表就算了 */ }
+  for (const item of listProcesses()) {
+    if (item.ppid !== 1) continue
+    if (!item.command.startsWith(`Xvfb -displayfd 1 -screen 0 ${XVFB_SCREEN}`)) continue
+    try {
+      process.kill(item.pid, 'SIGTERM')
+      logger.info(`[relay-checkin-plugin] 已回收上次运行残留的虚拟显示进程（pid ${item.pid}）`)
+    } catch { /* 已退出或无权限 */ }
+  }
 }
 
 /**

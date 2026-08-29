@@ -54,13 +54,16 @@ const browserSchema = s.object({
     .desc('AnyRouter 过阿里云 WAF、Turnstile / POW 站点自动降级签到所需，关闭后这类站点无法自动签到'),
   executablePath: s.string().default(D.browser.executablePath)
     .title('浏览器路径')
-    .placeholder('/usr/bin/google-chrome')
+    .placeholder(process.platform === 'win32'
+      ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
+      : '/usr/bin/google-chrome')
     .desc('留空自动选择版本最高的系统 Chrome/Edge，找不到才用 Puppeteer 自带 Chromium。Turnstile 要求浏览器较新'),
   wafTimeoutSec: s.number().int().min(5).max(600).default(D.browser.wafTimeoutSec)
     .title('WAF 等待时长（秒）').desc('等待阿里云 WAF 放行的最长时间，anyrouter 较慢，不够时可加大'),
   turnstileInteractive: s.boolean().default(D.browser.turnstileInteractive)
     .title('可见浏览器过 Turnstile')
-    .desc('导航后断开调试连接、由页面自治过码（Cloudflare 会因调试会话直接判定自动化）。无桌面服务器会自动拉起 Xvfb + xdotool'),
+    .desc('导航后断开调试连接、由页面自治过码（Cloudflare 会因调试会话直接判定自动化）。'
+      + 'Windows 和有桌面的机器直接用系统指针勾选，无桌面 Linux 会自动拉起 Xvfb + xdotool'),
   turnstileInteractiveTimeoutSec: s.number().int().min(30).max(600).default(D.browser.turnstileInteractiveTimeoutSec)
     .title('可见接管超时（秒）').desc('等待可见浏览器完成 Turnstile 的最长时间'),
   turnstileTimeoutSec: s.number().int().min(5).max(120).default(D.browser.turnstileTimeoutSec)
