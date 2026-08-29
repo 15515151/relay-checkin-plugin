@@ -90,12 +90,11 @@ python3 -m venv .venv
 TypeScript、零全局变量、插件可装可卸可热重载）。把仓库放进 NG 主目录的 `plugins/` 下即可：
 
 ```bash
-cd "$YZNG_HOME/plugins"          # 默认就是 NG 的启动目录
-git clone https://github.com/cchanlan/relay-checkin-plugin
-cd relay-checkin-plugin
+# 在 NG 主目录（默认就是 NG 的启动目录）执行
+git clone --depth=1 https://github.com/cchanlan/relay-checkin-plugin ./plugins/relay-checkin-plugin
 # NG 侧不像 TRSS 那样有现成依赖可蹭，要自己装。puppeteer 只用于过 WAF / Turnstile，
 # 出图不需要它（走内核渲染器），插件也会自动找系统 Chrome/Edge，所以可以跳过 Chromium 下载
-PUPPETEER_SKIP_DOWNLOAD=1 npm install
+PUPPETEER_SKIP_DOWNLOAD=1 npm install --prefix ./plugins/relay-checkin-plugin
 ```
 
 **出图需要一个渲染器插件。** NG 的内核不自带渲染实现（`ctx.render` 会去找已注册的渲染器），
