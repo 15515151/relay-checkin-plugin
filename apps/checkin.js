@@ -4,8 +4,8 @@ import { probeAccount, probeSessionAccount, probeSub2apiSite, normalizeBaseUrl, 
 import { checkinEntry, checkinAccount, finalizeCheckinResult, queryEntry, refreshBalances } from '../models/executor.js'
 import { withUserLock } from '../models/lock.js'
 import { renderResult, renderList, renderHelp } from '../models/render.js'
-import { runScheduledCheckin } from '../models/scheduler.js'
 import { browserHangBudgetMs } from '../models/browser.js'
+import { logger, pickBot, segment, defaultSelfId } from '../host/index.js'
 
 /**
  * 等待私聊补发凭据的绑定会话（key: QQ号字符串）
@@ -25,6 +25,16 @@ function clearPending(userId) {
     pendingBinds.delete(String(userId))
   }
   return pending
+}
+
+/**
+ * 清空所有等待中的绑定会话
+ *
+ * NG 卸载插件时调用：pendingBinds 里挂着超时定时器与群提示撤回定时器，
+ * 不收掉就会在插件已经卸载之后继续开火（去调一个不存在的 Bot）
+ */
+export function disposeBinds() {
+  for (const userId of [...pendingBinds.keys()]) clearPending(userId)
 }
 
 /**
@@ -52,8 +62,8 @@ async function recallBindPrompt(pending) {
     pending.promptTimer = null
   }
   try {
-    const bot = Bot[pending.selfId] ?? Bot
-    await bot.pickGroup(Number(pending.groupId) || pending.groupId).recallMsg(msgId)
+    const bot = pickBot(pending.selfId)
+    if (bot) await bot.recallGroupMsg(pending.groupId, msgId)
   } catch {
     // 已被撤回或超过撤回时限，忽略
   }
@@ -160,20 +170,21 @@ function bindRecallSec() {
 async function notifyBindGroup(pending, text, image = null) {
   if (!pending?.groupId) return
   try {
-    const bot = Bot[pending.selfId] ?? Bot
-    const group = bot.pickGroup(Number(pending.groupId) || pending.groupId)
+    const bot = pickBot(pending.selfId)
+    if (!bot) return
+    const seg = segment()
     const message = [
-      segment.reply(pending.messageId),
-      segment.at(Number(pending.userId) || pending.userId)
+      seg.reply(pending.messageId),
+      seg.at(pending.userId)
     ]
     if (image) message.push(image)
     else message.push(' ' + text)
-    const res = await group.sendMsg(message)
+    const res = await bot.sendGroup(pending.groupId, message)
     const sec = bindRecallSec()
     if (!image && sec > 0 && res?.message_id) {
       setTimeout(async () => {
         try {
-          await group.recallMsg(res.message_id)
+          await bot.recallGroupMsg(pending.groupId, res.message_id)
         } catch {
           // 超过撤回时限等情况，忽略
         }
@@ -186,8 +197,9 @@ async function notifyBindGroup(pending, text, image = null) {
 
 async function notifyBindPrivate(pending, text) {
   try {
-    const bot = Bot[pending.selfId] ?? Bot
-    await bot.pickFriend(Number(pending.userId) || pending.userId).sendMsg(text)
+    const bot = pickBot(pending.selfId)
+    if (!bot) return
+    await bot.sendPrivate(pending.userId, text)
   } catch {
     // 非好友等场景私聊发不出去，忽略（群回执兜底）
   }
@@ -212,38 +224,57 @@ async function getPrivateBlock(e) {
   return { passable: adopt.some(s => '中转绑定'.includes(String(s)) || '中转站绑定'.includes(String(s))) }
 }
 
-export default class RelayCheckinApp extends plugin {
-  constructor() {
-    super({
-      name: '中转站签到',
-      dsc: '中转站（new-api/Veloera 系）自动签到',
-      event: 'message',
-      priority: 5000,
-      rule: [
-        { reg: '^#中转(?:站)?(帮助|help)$', fnc: 'help' },
-        { reg: '^#中转(?:站)?添加邮箱\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addEmail' },
-        // 与「添加」规则互不冲突（那条要求 添加 后紧跟空格），仍与同族指令排在一起便于维护
-        { reg: '^#中转(?:站)?添加刷新令牌\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addRefresh' },
-        { reg: '^#中转(?:站)?添加[cC]ookie\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addCookie' },
-        { reg: '^#中转(?:站)?添加\\s+\\S+(?:\\s+\\S+)*$', fnc: 'add' },
-        { reg: '^#中转(?:站)?列表$', fnc: 'list' },
-        { reg: '^#中转(?:站)?删除\\s*(\\d+)$', fnc: 'remove' },
-        { reg: '^#中转(?:站)?签到\\s*(\\d+)?$', fnc: 'checkin' },
-        { reg: '^#中转(?:站)?查询$', fnc: 'query' },
-        { reg: '^#中转(?:站)?定时\\s*(开|关)\\s*(\\d+)?$', fnc: 'toggleAuto' },
-        { reg: '^#中转(?:站)?(开启|关闭)(定时(签到)?)?群推送$', fnc: 'togglePushGroup' },
-        // 私聊补发凭据兜底：命中任意消息，处理器按原始文本与绑定会话判断是否消费
-        // （不能按首字符过滤：/ 开头的令牌会被核心归一化，规则层看不到原字符）
-        { reg: '^[\\s\\S]+$', fnc: 'bindCredentials', log: false }
-      ]
-    })
+/**
+ * 指令表：触发正则 → 处理方法名。TRSS 与 NG 两个入口共用这一份
+ * （TRSS 把它铺成 plugin 的 rule，NG 铺成 ctx.command）。
+ * fallback 标记的是「命中任意消息」的兜底规则，NG 侧要额外给它设成不阻断后续命令。
+ */
+export const COMMAND_RULES = [
+  { reg: '^#中转(?:站)?(帮助|help)$', fnc: 'help', desc: '中转站签到帮助图' },
+  { reg: '^#中转(?:站)?添加邮箱\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addEmail', desc: '邮箱登录绑定（AgentRouter / Sub2API）' },
+  // 与「添加」规则互不冲突（那条要求 添加 后紧跟空格），仍与同族指令排在一起便于维护
+  { reg: '^#中转(?:站)?添加刷新令牌\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addRefresh', desc: '刷新令牌绑定（Sub2API）' },
+  { reg: '^#中转(?:站)?添加[cC]ookie\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addCookie', desc: 'Cookie 绑定（AnyRouter / 旧版站点）' },
+  { reg: '^#中转(?:站)?添加\\s+\\S+(?:\\s+\\S+)*$', fnc: 'add', desc: '令牌绑定，自动识别站点类型' },
+  { reg: '^#中转(?:站)?列表$', fnc: 'list', desc: '我的账号列表' },
+  { reg: '^#中转(?:站)?删除\\s*(\\d+)$', fnc: 'remove', desc: '删除指定序号的账号' },
+  { reg: '^#中转(?:站)?签到\\s*(\\d+)?$', fnc: 'checkin', desc: '立即签到全部或指定账号' },
+  { reg: '^#中转(?:站)?查询$', fnc: 'query', desc: '查询余额' },
+  { reg: '^#中转(?:站)?定时\\s*(开|关)\\s*(\\d+)?$', fnc: 'toggleAuto', desc: '定时签到开关' },
+  { reg: '^#中转(?:站)?(开启|关闭)(定时(签到)?)?群推送$', fnc: 'togglePushGroup', desc: '把本群加入/移出定时推送目标' },
+  // 私聊补发凭据兜底：命中任意消息，处理器按原始文本与绑定会话判断是否消费
+  // （不能按首字符过滤：/ 开头的令牌会被核心归一化，规则层看不到原字符）
+  { reg: '^[\\s\\S]+$', fnc: 'bindCredentials', log: false, fallback: true, desc: '私聊补发凭据（兜底，不出现在帮助里）' }
+]
 
-    // 定时签到任务（cron 修改后需重启生效）
-    this.task = [{
-      name: '中转站定时签到',
-      cron: getConfig().schedule.cron,
-      fnc: () => runScheduledCheckin()
-    }]
+/** 定时签到任务名（两个宿主的任务列表都用它） */
+export const CHECKIN_TASK_NAME = '中转站定时签到'
+
+/**
+ * 指令处理主体
+ *
+ * 原来这是个 `extends plugin` 的 TRSS 插件类。为了同时给 Yunzai NG 用，
+ * 改成不继承任何宿主基类：宿主入口负责把消息事件与回复函数注入进来，
+ * 类体内部照旧用 `this.e` 与 `this.reply(...)`，因此 1100 行指令逻辑无需改动。
+ */
+export class RelayCheckinCore {
+  /** 由入口注入的回复函数 */
+  #reply
+
+  /**
+   * @param {{e: object, reply: Function}} deps e 为 TRSS 形状的消息事件
+   *   （NG 侧由 ng/event.js 把内核事件包成同一形状），reply 为回复函数
+   */
+  constructor({ e, reply }) {
+    this.e = e
+    this.#reply = reply
+  }
+
+  /**
+   * 回复消息，签名沿用 TRSS：reply(内容, 是否引用, { recallMsg, at })
+   */
+  async reply(...args) {
+    return await this.#reply(...args)
   }
 
   /**
@@ -577,7 +608,7 @@ export default class RelayCheckinApp extends plugin {
       baseUrl: site.baseUrl,
       host: site.host,
       userId: key,
-      selfId: String(this.e.self_id ?? Bot.uin),
+      selfId: String(this.e.self_id ?? defaultSelfId()),
       groupId: this.e.isGroup ? String(this.e.group_id) : null,
       messageId: this.e.message_id,
       timer: null,

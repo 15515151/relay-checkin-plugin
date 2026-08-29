@@ -12,6 +12,11 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 global.logger = { info: () => {}, mark: () => {}, warn: () => {}, error: (...a) => console.error('[logger.error]', ...a) }
 global.Bot = { uin: 10000 }
 
+// ---- 装上 TRSS 宿主适配层（业务代码通过它取 logger / 数据目录 / 配置 / 出图）----
+const { installHost } = await import('../host/index.js')
+const { createTrssHost } = await import('../host/trss.js')
+installHost(createTrssHost())
+
 const DATA = path.join(ROOT, 'data')
 const hadData = fs.existsSync(DATA)
 const backup = path.join(ROOT, 'data_backup_behavior')
@@ -585,7 +590,9 @@ try {
     assert.doesNotMatch(source, /\bzoom\s*:/, `${file} 不应使用会导致旧版 TRSS 截图裁切的 zoom`)
     assert.doesNotMatch(source, /transform:\s*scale\s*\(/, `${file} 不应使用需要运行时配合的 CSS scale`)
   }
-  assert.match(fs.readFileSync(path.join(ROOT, 'models', 'render.js'), 'utf8'), /imgType:\s*'png'/, '模板截图应使用无损 PNG')
+  // 出图参数在宿主适配层里（TRSS 走 Yunzai 的 lib/puppeteer，NG 走插件自带渲染）
+  assert.match(fs.readFileSync(path.join(ROOT, 'host', 'trss.js'), 'utf8'), /imgType:\s*'png'/, 'TRSS 模板截图应使用无损 PNG')
+  assert.match(fs.readFileSync(path.join(ROOT, 'ng', 'render.js'), 'utf8'), /type:\s*'png'/, 'NG 模板截图应使用无损 PNG')
   console.log('模板渲染 OK')
 
   console.log('\n全部行为测试通过 ✓')

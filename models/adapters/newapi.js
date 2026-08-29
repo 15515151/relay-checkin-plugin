@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import os from 'node:os'
 import { request, parseUserInfo, parseCheckinResult } from './common.js'
 import { getConfig } from '../config.js'
+import { logger } from '../../host/index.js'
 
 const integritySessions = new Map()
 

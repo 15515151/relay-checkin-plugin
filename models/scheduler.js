@@ -4,6 +4,7 @@ import { checkinEntry, sleep, randInt } from './executor.js'
 import { renderResult, renderResultPages } from './render.js'
 import { withUserLock } from './lock.js'
 import { buildGroupPushPlan } from './push-plan.js'
+import { logger, pickBot } from '../host/index.js'
 
 let running = false
 
@@ -84,10 +85,6 @@ function toUserBlock({ entry, results }) {
   return { nickname: entry.nickname || entry.userId, userId: entry.userId, accounts: results }
 }
 
-function getBot(selfId) {
-  return Bot[selfId] ?? Bot
-}
-
 /**
  * 按配置推送签到结果。
  * group 模式：将全部签到结果推送到 push_groups.json 中的每一个群；
@@ -121,23 +118,22 @@ async function pushResults(done, cfg) {
   const delivered = new Set()
   for (const { selfId, groupId, items } of groups) {
     try {
-      const bot = getBot(selfId)
-      const group = bot.pickGroup(Number(groupId) || groupId)
+      const bot = pickBot(selfId)
+      if (!bot) {
+        logger.error(`[relay-checkin-plugin] 账号 ${selfId} 不在线，群 ${groupId} 推送跳过`)
+        continue
+      }
       const users = items.map(toUserBlock)
       // 每张图最多 usersPerImage 个用户，超出分页成多张图合并转发
       const images = await renderResultPages({ title: '中转站定时签到', users })
       if (!images.length) continue
+      // 中性的转发节点形状，由宿主适配层翻译成各自的字段名
       const nodes = images.map(img => ({
         message: img,
-        nickname: '中转站签到',
-        // TRSS 多 bot 时全局 Bot.uin 是数组，转发节点头像直接用所属 bot 的 QQ
-        user_id: Number(selfId) || selfId
+        name: '中转站签到',
+        uid: bot.selfId || String(selfId)
       }))
-      // Miao-Yunzai（icqq）在群对象上构造合并转发；TRSS 用全局 Bot.makeForwardMsg
-      const forward = group.makeForwardMsg
-        ? await group.makeForwardMsg(nodes)
-        : await Bot.makeForwardMsg(nodes)
-      await group.sendMsg(forward)
+      await bot.sendForwardToGroup(groupId, nodes)
       logger.info(`[relay-checkin-plugin] 群 ${groupId} 推送成功，共 ${items.length} 个用户`)
       for (const it of items) delivered.add(it.entry.userId)
     } catch (err) {
@@ -162,8 +158,12 @@ async function pushPrivate({ entry, results }) {
       users: [toUserBlock({ entry, results })]
     })
     if (!img) return
-    const userId = Number(entry.userId) || entry.userId
-    await getBot(entry.selfId).pickFriend(userId).sendMsg(img)
+    const bot = pickBot(entry.selfId)
+    if (!bot) {
+      logger.error(`[relay-checkin-plugin] 账号 ${entry.selfId} 不在线，私聊 ${entry.userId} 推送跳过`)
+      return
+    }
+    await bot.sendPrivate(entry.userId, img)
   } catch (err) {
     logger.error(`[relay-checkin-plugin] 私聊 ${entry.userId} 推送失败: ${err?.message || err}`)
   }

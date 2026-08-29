@@ -1,17 +1,12 @@
-import path from 'node:path'
-import puppeteer from '../../../lib/puppeteer/puppeteer.js'
-import { PLUGIN_PATH, getConfig } from './config.js'
+import { getConfig } from './config.js'
+import { renderTemplate } from '../host/index.js'
 import { accountLabel } from './store.js'
-
-const TPL_PATH = path.join(PLUGIN_PATH, 'resources', 'template')
 
 function now() {
   const d = new Date()
   const pad = n => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
-
-let renderSeq = 0
 
 const COMMON_CN_DIGITS = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九']
 const FINANCIAL_CN_DIGITS = ['零', '壹', '贰', '叁', '肆', '伍', '陆', '柒', '捌', '玖']
@@ -57,19 +52,11 @@ function resultViewData(users) {
 
 /**
  * 通用模板渲染，返回可直接发送的图片消息段（失败返回 false）
- * saveId 轮转编号，避免定时任务与手动指令并发渲染时写同名文件
+ * 具体出图方式由宿主决定：TRSS 走 Yunzai 的 lib/puppeteer，NG 走插件自带的
+ * art-template + puppeteer（NG 目前没有官方渲染器插件可用）
  */
 async function render(tplName, data) {
-  renderSeq = (renderSeq + 1) % 20
-  return await puppeteer.screenshot(`relay-checkin-plugin/${tplName}`, {
-    tplFile: path.join(TPL_PATH, `${tplName}.html`),
-    pluResPath: path.join(PLUGIN_PATH, 'resources') + path.sep,
-    saveId: `${tplName}_${renderSeq}`,
-    // TRSS-Yunzai defaults to JPEG 90. The templates contain dense small text,
-    // so keep the first-generation image lossless before QQ processes it.
-    imgType: 'png',
-    ...data
-  })
+  return await renderTemplate(tplName, data)
 }
 
 /**

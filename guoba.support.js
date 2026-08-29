@@ -1,4 +1,5 @@
 import { getConfig, setConfigValues } from './models/config.js'
+import { logger } from './host/index.js'
 
 const divider = label => ({
   component: 'Divider',

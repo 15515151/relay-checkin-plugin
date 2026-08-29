@@ -2,7 +2,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { DATA_PATH, getConfig } from './config.js'
+import { dataPath, getConfig } from './config.js'
+import { logger } from '../host/index.js'
 import { proxyForHost } from './adapters/common.js'
 import { assertSafeRequestUrl } from './url-security.js'
 
@@ -45,7 +46,7 @@ export function browserPoolKey({ interactive = false, proxyServer = '', profileK
 }
 
 export function interactiveProfilePath(profileKey, proxyServer = '', executablePath = '') {
-  return path.join(DATA_PATH, 'browser-profile', profileFingerprint(profileKey, proxyServer || 'direct', executablePath))
+  return path.join(dataPath(), 'browser-profile', profileFingerprint(profileKey, proxyServer || 'direct', executablePath))
 }
 
 /**
@@ -1963,7 +1964,7 @@ export async function dumpDetachedFailure(ws, host, display) {
       + `｜Turnstile 组件=${snapshot.iframe}｜token 长度=${snapshot.tokenLen}`
       + `｜指针停在=${mouse || '未知'}｜标题=${snapshot.title}`)
 
-    const dir = path.join(DATA_PATH, 'turnstile-debug')
+    const dir = path.join(dataPath(), 'turnstile-debug')
     fs.mkdirSync(dir, { recursive: true })
     const file = path.join(dir, `${Date.now()}-${host}.png`)
     await withTimeout(page.screenshot({ path: file }), 20000, '截图超时')

@@ -15,6 +15,11 @@ global.logger = {
 }
 global.Bot = { uin: 10000 }
 
+// ---- 装上 TRSS 宿主适配层（业务代码通过它取 logger / 数据目录 / 配置 / 出图）----
+const { installHost } = await import('../host/index.js')
+const { createTrssHost } = await import('../host/trss.js')
+installHost(createTrssHost())
+
 // 用干净的 data 目录测试
 const DATA = path.join(ROOT, 'data')
 const hadData = fs.existsSync(DATA)

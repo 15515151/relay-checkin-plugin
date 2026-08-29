@@ -1,3 +1,4 @@
+import { logger } from '../host/index.js'
 /**
  * 按用户的互斥锁：同一 QQ 的签到/查询/添加/删除等操作串行执行。
  *

@@ -4,6 +4,7 @@ import { powCheckin, turnstileCheckin } from './browser.js'
 import { ocrCaptcha } from './ocr.js'
 import { getConfig } from './config.js'
 import { accountLabel, persist } from './store.js'
+import { logger } from '../host/index.js'
 
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 

@@ -3,12 +3,27 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import YAML from 'yaml'
 import chokidar from 'chokidar'
+import { logger, dataDir, currentHost } from '../host/index.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 export const PLUGIN_PATH = path.join(__dirname, '..')
-export const DATA_PATH = path.join(PLUGIN_PATH, 'data')
-export const CONFIG_PATH = path.join(DATA_PATH, 'config.yaml')
+
+/** TRSS 宿主的数据目录：插件目录下的 data/（NG 用 ctx.dataDir，见 host/ng.js） */
+export const TRSS_DATA_PATH = path.join(PLUGIN_PATH, 'data')
+
+/**
+ * 数据目录。以前是顶层常量 DATA_PATH，改成函数是因为 NG 下它来自注入的 ctx，
+ * 模块求值时还不知道
+ */
+export function dataPath() {
+  return dataDir()
+}
+
+/** 配置文件路径（仅 TRSS 宿主使用；NG 的配置由内核按 schema 管理） */
+export function configPath() {
+  return path.join(dataPath(), 'config.yaml')
+}
 
 /**
  * 原子写入用的重命名：Windows 下杀软/同步盘可能短暂锁住文件导致 EPERM，短暂重试
@@ -26,7 +41,7 @@ export function renameWithRetry(from, to, tries = 5) {
   }
 }
 
-const DEFAULT_CONFIG = {
+export const DEFAULT_CONFIG = {
   schedule: {
     enable: true,
     cron: '0 10 8 * * *',
@@ -79,6 +94,8 @@ let configWatcher = null
  * 首次启动时把 config_default/config.yaml 复制到 data/config.yaml
  */
 function ensureConfigFiles() {
+  const DATA_PATH = dataPath()
+  const CONFIG_PATH = configPath()
   if (!fs.existsSync(DATA_PATH)) {
     fs.mkdirSync(DATA_PATH, { recursive: true })
   }
@@ -126,6 +143,7 @@ function findMissingKeys(def, user, path = []) {
  * 用户改过的值全部保留，仅补上缺失的新增项
  */
 function syncNewConfigKeys(userConfig) {
+  const CONFIG_PATH = configPath()
   const defaultConfigPath = path.join(PLUGIN_PATH, 'config_default', 'config.yaml')
   if (!fs.existsSync(defaultConfigPath)) return
   const missing = findMissingKeys(DEFAULT_CONFIG, userConfig)
@@ -161,6 +179,7 @@ function syncNewConfigKeys(userConfig) {
 export function setConfigValues(values) {
   ensureConfigFiles()
 
+  const CONFIG_PATH = configPath()
   const raw = fs.existsSync(CONFIG_PATH) ? fs.readFileSync(CONFIG_PATH, 'utf-8') : ''
   const doc = YAML.parseDocument(raw)
   // 空文件 parseDocument 得到 null contents，先补成映射再 setIn
@@ -180,13 +199,23 @@ export function setConfigValues(values) {
 }
 
 /**
- * 读取配置（带缓存与热更新）
+ * 读取配置。实际实现由宿主决定：
+ * TRSS 是下面的 readYamlConfig（data/config.yaml + 热更新），
+ * NG 是 ctx.config.get()（内核按 configSchema 管理，面板保存即生效）
  */
 export function getConfig() {
+  return currentHost().getConfig()
+}
+
+/**
+ * TRSS 宿主的配置读取：data/config.yaml（带缓存与 chokidar 热更新）
+ */
+export function readYamlConfig() {
   if (configCache) return configCache
 
   ensureConfigFiles()
 
+  const CONFIG_PATH = configPath()
   let userConfig = {}
   let parseOk = true
   try {
@@ -210,4 +239,35 @@ export function getConfig() {
   }
 
   return configCache
+}
+
+/**
+ * 关掉配置文件监听并清空缓存
+ *
+ * NG 会在插件卸载时调用（内核要求「卸载真的归还资源」，chokidar 的 watcher
+ * 属于 ctx 之外自己开的资源，必须登记到 onDispose）。TRSS 下用不上但无害。
+ */
+export async function disposeConfig() {
+  configCache = null
+  if (configWatcher) {
+    const watcher = configWatcher
+    configWatcher = null
+    try {
+      await watcher.close()
+    } catch {
+      // 已关闭或从未真正启动，忽略
+    }
+  }
+}
+
+/**
+ * 用默认值补全一份外部配置（NG 宿主用）
+ *
+ * NG 的 configSchema 已经保证了结构，但用户手改 YAML、或插件升级引入新键时
+ * 仍可能缺项，这里统一用 DEFAULT_CONFIG 兜一层，语义与 TRSS 侧一致。
+ * @param {object} external 外部配置
+ * @returns {object} 合并后的配置
+ */
+export function withDefaults(external) {
+  return mergeConfig(DEFAULT_CONFIG, external || {})
 }

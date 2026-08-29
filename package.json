@@ -1,7 +1,20 @@
 {
   "name": "relay-checkin-plugin",
-  "version": "1.0.0",
-  "description": "中转站（new-api/Veloera 系）自动签到插件，适用于 TRSS-Yunzai + OneBot v11",
+  "version": "1.1.0",
+  "description": "中转站（new-api / Veloera / AnyRouter / AgentRouter / Sub2API）自动签到插件，支持 TRSS-Yunzai 与 Yunzai NG",
   "author": "",
-  "type": "module"
+  "homepage": "https://github.com/cchanlan/relay-checkin-plugin",
+  "type": "module",
+  "yunzai": {
+    "entry": "ng/index.js"
+  },
+  "engines": {
+    "node": ">=20.11"
+  },
+  "dependencies": {
+    "art-template": "^4.13.2",
+    "chokidar": "^4.0.3",
+    "puppeteer": "^24.30.0",
+    "yaml": "^2.8.1"
+  }
 }

@@ -1,6 +1,7 @@
 import { request } from './common.js'
 import { sub2apiLogin } from '../browser.js'
 import { persist } from '../store.js'
+import { logger } from '../../host/index.js'
 
 /**
  * Sub2API（自研 Go 网关，前端标题 "Sub2API - AI API Gateway"）

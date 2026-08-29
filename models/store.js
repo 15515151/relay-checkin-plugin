@@ -1,9 +1,19 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { DATA_PATH, renameWithRetry } from './config.js'
+import { dataPath, renameWithRetry } from './config.js'
+import { logger, defaultSelfId } from '../host/index.js'
 
-const STORE_PATH = path.join(DATA_PATH, 'accounts.json')
-const PUSH_GROUPS_PATH = path.join(DATA_PATH, 'push_groups.json')
+/**
+ * 数据文件路径。以前是模块顶层常量，NG 下数据目录来自注入的 ctx，
+ * 模块求值时还取不到，故改为函数
+ */
+function storePath() {
+  return path.join(dataPath(), 'accounts.json')
+}
+
+function pushGroupsPath() {
+  return path.join(dataPath(), 'push_groups.json')
+}
 
 let storeCache = null
 let pushGroupsCache = null
@@ -25,6 +35,7 @@ let pushGroupsCache = null
 function load() {
   if (storeCache) return storeCache
   try {
+    const STORE_PATH = storePath()
     if (fs.existsSync(STORE_PATH)) {
       storeCache = JSON.parse(fs.readFileSync(STORE_PATH, 'utf-8'))
     } else {
@@ -41,6 +52,8 @@ function load() {
  * 原子写入，避免写一半崩溃损坏数据
  */
 function save() {
+  const DATA_PATH = dataPath()
+  const STORE_PATH = storePath()
   if (!fs.existsSync(DATA_PATH)) fs.mkdirSync(DATA_PATH, { recursive: true })
   const tmp = STORE_PATH + '.tmp'
   fs.writeFileSync(tmp, JSON.stringify(storeCache, null, 2))
@@ -82,7 +95,7 @@ export function ensureEntry(e) {
     store[key] = {
       groupId: null,
       userId: String(e.user_id),
-      selfId: String(e.self_id ?? Bot.uin),
+      selfId: String(e.self_id ?? defaultSelfId()),
       nickname: '',
       autoCheckin: true,
       accounts: []
@@ -232,6 +245,7 @@ export function persist() {
  */
 function loadPushGroups() {
   try {
+    const PUSH_GROUPS_PATH = pushGroupsPath()
     const parsed = fs.existsSync(PUSH_GROUPS_PATH)
       ? JSON.parse(fs.readFileSync(PUSH_GROUPS_PATH, 'utf-8'))
       : []
@@ -249,6 +263,8 @@ function loadPushGroups() {
 }
 
 function savePushGroups() {
+  const DATA_PATH = dataPath()
+  const PUSH_GROUPS_PATH = pushGroupsPath()
   if (!fs.existsSync(DATA_PATH)) fs.mkdirSync(DATA_PATH, { recursive: true })
   const tmp = PUSH_GROUPS_PATH + '.tmp'
   fs.writeFileSync(tmp, JSON.stringify(pushGroupsCache, null, 2))

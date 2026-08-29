@@ -1,6 +1,7 @@
 import { request, parseUserInfo, parseCheckinResult, deriveAwardQuota } from './common.js'
 import { fetchWafCookies } from '../browser.js'
 import { getConfig } from '../config.js'
+import { logger } from '../../host/index.js'
 
 const WAF_MSG = 'WAF 未放行（浏览器等待超时），请稍后重试'
 
