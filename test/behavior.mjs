@@ -44,8 +44,12 @@ try {
   const cfgMod = await import('../models/config.js')
   const cfgNow = cfgMod.getConfig()
   cfgNow.security.allowedPrivateHosts = [
-    'agentrouter.org', 'newapi.test', 'n.com', 'v.com', 'x.com', 't.com', 'anyrouter.top'
+    'agentrouter.org', 'newapi.test', 'n.com', 'v.com', 'x.com', 't.com', 'anyrouter.top', 's2.test'
   ]
+  // 同理，测试也不能受运行环境（data/config.yaml 或 config_default 模板）里的代理配置影响：
+  // 命中 proxy.hosts 的站点会走 node:https + proxy agent，完全绕过上面的 mock fetch
+  // 打到真实站点上，测试便会以站点的真实响应失败。
+  cfgNow.proxy = { url: '', hosts: [], useForBrowser: false }
   const agentrouter = (await import('../models/adapters/agentrouter.js')).default
   const { probeAccount } = await import('../models/adapters/index.js')
   const { checkinAccount, checkinEntry, refreshBalances } = await import('../models/executor.js')
@@ -260,6 +264,97 @@ try {
   assert.equal(entryRB.accounts[0].lastBalance, '$5.00', 'HTTP 站应实时刷新余额')
   assert.equal(entryRB.accounts[0].username, 'u7', '刷新时应同步用户名')
   assert.equal(entryRB.accounts[1].lastBalance, '$9.99', '浏览器站应保留缓存不实时查询')
+
+  // ---- 3.7 Sub2API：refresh_token 轮换必须立刻写回，列表刷新不得回退到浏览器 ----
+  const sub2api = (await import('../models/adapters/sub2api.js')).default
+  const S2 = () => ({
+    name: 's2.test', baseUrl: 'https://s2.test', type: 'sub2api', authMode: 'refresh',
+    token: 'RT1', accessToken: '', tokenExpiresAt: null, siteUserId: null, lastBalance: '$1.00'
+  })
+  const refreshBodies = []
+  let meAuth = null
+  routes = {
+    'POST https://s2.test/api/v1/auth/refresh': opts => {
+      refreshBodies.push(JSON.parse(opts.body))
+      return {
+        status: 200,
+        body: { code: 0, message: 'success', data: { access_token: 'AT2', refresh_token: 'RT2', expires_in: 86400 } }
+      }
+    },
+    'GET https://s2.test/api/v1/auth/me': opts => {
+      meAuth = opts.headers.Authorization
+      return {
+        status: 200,
+        body: { code: 0, data: { id: 5, username: 's5', balance: 3.5, free_balance: 1.25, total_recharged: 10 } }
+      }
+    }
+  }
+  const s2 = S2()
+  const s2Info = await sub2api.userInfo(s2)
+  assert.equal(s2Info.ok, true)
+  assert.equal(s2Info.balanceText, '$3.50 (免费 $1.25)', '站点余额本身是美元，不得再走 quota 换算')
+  assert.equal(s2Info.siteUserId, 5, '需回传站点用户ID供 upsertAccount 去重')
+  assert.deepEqual(refreshBodies, [{ refresh_token: 'RT1' }])
+  assert.equal(meAuth, 'Bearer AT2')
+  assert.equal(s2.token, 'RT2', '一次性 refresh_token 轮换后必须立刻写回账号')
+  assert.equal(s2.accessToken, 'AT2')
+  assert.ok(Number(s2.tokenExpiresAt) > Date.now(), '应记录 access_token 到期时间避免每次都烧 refresh')
+
+  // 凭据全失效时列表刷新只能纯 HTTP 尝试：开浏览器过码要一两分钟，而这里 10 秒就超时，
+  // 被丢下的浏览器任务仍会占着全局页面槽位，把后续签到一起拖慢。
+  const savedBrowserEnable = cfgNow.browser.enable
+  cfgNow.browser.enable = false // 兜底：万一真走到浏览器分支，立即失败而不是启动 Chrome
+  routes = {}
+  const deadS2 = { ...S2(), token: '', authMode: 'email', loginEmail: 'a@b.com', password: 'p' }
+  const noBrowser = await sub2api.userInfo(deadS2, { allowBrowser: false })
+  assert.equal(noBrowser.ok, false)
+  assert.match(noBrowser.msg, /不启动浏览器/, '禁用浏览器时应明确返回原因而不是去过码')
+  const entryS2 = { accounts: [deadS2] }
+  await refreshBalances(entryS2)
+  assert.equal(entryS2.accounts[0].lastBalance, '$1.00', '刷新失败应保留旧余额缓存')
+  cfgNow.browser.enable = savedBrowserEnable
+
+  // 签到全链路：状态未签 → POST 领取 → 状态复核已签；奖励与余额都是站点直接给的美元
+  let s2StatusCalls = 0
+  routes = {
+    'GET https://s2.test/api/v1/check-in/status': () => {
+      s2StatusCalls++
+      const checked = s2StatusCalls > 2
+      return {
+        status: 200,
+        body: {
+          code: 0,
+          data: {
+            checked_in_today: checked, turnstile_required: false,
+            today_reward: 0.5, balance: checked ? 4 : 3.5, free_balance: 0.25
+          }
+        }
+      }
+    },
+    'POST https://s2.test/api/v1/check-in': {
+      status: 200,
+      body: { code: 0, data: { already_checked_in: false, reward_amount: 0.5, balance: 4, free_balance: 0.25 } }
+    },
+    'GET https://s2.test/api/v1/auth/me': {
+      status: 200,
+      body: { code: 0, data: { id: 5, username: 's5', balance: 4, free_balance: 0.25, total_recharged: 10 } }
+    }
+  }
+  const s2Fresh = { ...S2(), token: '', accessToken: 'AT_OK', tokenExpiresAt: Date.now() + 3600000 }
+  const s2Row = await checkinAccount(s2Fresh)
+  assert.equal(s2Row.status, 'ok')
+  assert.equal(s2Row.award, '+$0.50', 'Sub2API 奖励为美元金额，不得当成 quota 换算')
+  assert.equal(s2Row.balance, '$4.00 (免费 $0.25)')
+
+  // 重复签到：站点回 already_checked_in 时按今日已签展示今日奖励
+  s2StatusCalls = 3
+  routes['POST https://s2.test/api/v1/check-in'] = {
+    status: 200,
+    body: { code: 0, data: { already_checked_in: true, today_reward: 0.5, balance: 4, free_balance: 0.25 } }
+  }
+  const s2Again = await checkinAccount({ ...S2(), token: '', accessToken: 'AT_OK', tokenExpiresAt: Date.now() + 3600000 })
+  assert.equal(s2Again.status, 'already')
+  assert.equal(s2Again.award, '今日 +$0.50')
 
   // ---- 4. probeAccount：new-api 命中 ----
   let capturedAuth = ''

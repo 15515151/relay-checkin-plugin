@@ -226,7 +226,7 @@ export function classifyValidation(json, meta = {}) {
     return 'pow'
   }
   if (/turnstile/i.test(text)) return 'turnstile'
-  if (/captcha|验证码|人机/i.test(text)) return 'captcha'
+  if (/captcha|验证码|人机|请打开网站|请从网站页面发起签到/i.test(text)) return 'captcha'
   if (/访问验证|checking your browser|aliyun_waf|acw_sc|cloudflare|waf/i.test(text)) return 'waf'
   return null
 }

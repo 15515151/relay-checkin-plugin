@@ -1,6 +1,7 @@
 import { getAdapter } from './adapters/index.js'
 import { quotaToUsd, request, parseCheckinResult, classifyValidation, deriveAwardQuota } from './adapters/common.js'
 import { powCheckin, turnstileCheckin } from './browser.js'
+import { ocrCaptcha } from './ocr.js'
 import { getConfig } from './config.js'
 import { accountLabel, persist } from './store.js'
 
@@ -29,6 +30,57 @@ const STATUS_TEXT = { ok: '签到成功', already: '今日已签', unknown: '签
  */
 function needsBrowser(msg) {
   return /turnstile|人机|验证码|captcha|访问验证|checking your browser|安全验证|verification_required|pow[_ -]?shield|proof.?of.?work/i.test(String(msg || ''))
+}
+
+/**
+ * 图形验证码站点降级签到（NewAPI 魔改站常见流程）：
+ * POST /api/user/checkin/captcha 取 captcha_id + 图片 → ddddocr 识别 → 带
+ * captcha_id/captcha_answer 重新提交签到，答错自动换码重试。
+ */
+async function captchaFallback(account, adapter, checkinPath = adapter.checkinPath, maxAttempts = 15) {
+  const headers = adapter.buildHeaders(account)
+  const captchaUrl = new URL('/api/user/checkin/captcha', `${account.baseUrl}/`).toString()
+  const checkinUrl = new URL(checkinPath, `${account.baseUrl}/`).toString()
+  let lastMsg = ''
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const cap = await request(captchaUrl, { method: 'POST', headers })
+    const captchaId = cap.json?.data?.captcha_id
+    const image = cap.json?.data?.captcha_image
+    if (!cap.json?.success || !captchaId || !image) {
+      const msg = cap.json?.message || `HTTP ${cap.status}`
+      const hint = /请打开网站/.test(String(msg)) ? '（该站签到接口只认网页会话，请改用 #中转添加cookie 地址 session值 用户ID 绑定）' : ''
+      logger.warn(`[relay-checkin-plugin] ${account.name} 获取验证码失败：${msg}`)
+      return { ok: false, already: false, validation: 'captcha', msg: `获取验证码失败：${msg}${hint}` }
+    }
+
+    let answer = ''
+    try {
+      answer = await ocrCaptcha(Buffer.from(image.replace(/^data:image\/\w+;base64,/, ''), 'base64'))
+    } catch (err) {
+      logger.warn(`[relay-checkin-plugin] ${account.name} 验证码识别异常：${err?.message || err}`)
+      return { ok: false, already: false, validation: 'captcha', msg: `验证码识别失败：${err?.message || err}` }
+    }
+    if (!answer) {
+      lastMsg = '验证码识别结果为空'
+      continue
+    }
+    logger.warn(`[relay-checkin-plugin] ${account.name} 验证码识别：${answer}（第 ${attempt} 次）`)
+
+    const res = await request(checkinUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ captcha_id: captchaId, captcha_answer: answer })
+    })
+    const parsed = parseCheckinResult(res.status, res.json, res)
+    if (parsed.ok || parsed.already) {
+      logger.warn(`[relay-checkin-plugin] ${account.name} 验证码签到完成（第 ${attempt} 次尝试）`)
+      return parsed
+    }
+    lastMsg = parsed.msg
+    // 答错：站点侧验证码已作废，换新码重试
+  }
+  return { ok: false, already: false, validation: 'captcha', msg: `验证码自动识别未通过（已重试 ${maxAttempts} 次）：${lastMsg}` }
 }
 
 /**
@@ -120,6 +172,7 @@ export async function checkinAccount(account) {
         already: true,
         confirmed: true,
         awardQuota: beforeStatus.awardQuota ?? null,
+        awardText: beforeStatus.awardText ?? null,
         statusTextOverride: '本轮前已签到',
         msg: ''
       }
@@ -146,7 +199,15 @@ export async function checkinAccount(account) {
         // 站点要求人机验证且浏览器方案可用时，自动降级为浏览器签到
         const validation = r?.validation || classifyValidation({ message: r?.msg })
         const browserCheckinPath = account.signPath || adapter.checkinPath
-        if (!r.ok && browserCheckinPath && getConfig().browser.enable && (validation || needsBrowser(r.msg))) {
+        // 图形验证码：不依赖浏览器，直接取码识别后重提签到
+        if (!r.ok && browserCheckinPath && validation === 'captcha') {
+          logger.info(`[relay-checkin-plugin] ${account.name} 需图形验证码，尝试自动识别`)
+          try {
+            r = await captchaFallback(account, adapter, browserCheckinPath)
+          } catch (err) {
+            r = { ok: false, already: false, validation: 'captcha', msg: `验证码方案失败：${err?.message || err}` }
+          }
+        } else if (!r.ok && browserCheckinPath && getConfig().browser.enable && (validation || needsBrowser(r.msg))) {
           if (validation === 'pow' || /安全验证|pow[_ -]?shield|proof.?of.?work/i.test(r.msg || '')) {
             logger.info(`[relay-checkin-plugin] ${account.name} 需 POW 安全验证，尝试浏览器方案`)
             try {
@@ -172,12 +233,14 @@ export async function checkinAccount(account) {
             already: !changedThisRun,
             confirmed: true,
             awardQuota: r.awardQuota ?? afterStatus.awardQuota ?? null,
+            awardText: r.awardText ?? afterStatus.awardText ?? null,
             statusTextOverride: changedThisRun ? '状态复核成功' : '状态复核已签',
             msg: ''
           }
         } else {
           r.confirmed = true
           if (r.awardQuota == null) r.awardQuota = afterStatus.awardQuota ?? null
+          if (r.awardText == null) r.awardText = afterStatus.awardText ?? null
         }
       } else if (r.uncertain && afterStatus?.ok && !afterStatus.checked) {
         r.msg = `${r.msg}；状态复核仍为未签到`
@@ -223,8 +286,9 @@ export function finalizeCheckinResult(account, r, { beforeInfo = null, afterInfo
     result.status = r.confirmed === false ? 'unknown' : (r.already ? 'already' : 'ok')
     result.statusText = r.statusTextOverride || STATUS_TEXT[result.status]
     result.msg = r.msg || ''
-    if (r.awardQuota != null) {
-      const value = quotaToUsd(r.awardQuota) ?? r.awardQuota
+    // Sub2API 等站点的奖励本身就是美元金额，由适配器直接给出文本，不走 quota 换算
+    const value = r.awardText ?? (r.awardQuota != null ? (quotaToUsd(r.awardQuota) ?? r.awardQuota) : null)
+    if (value != null) {
       result.award = r.already ? `今日 +${value}` : `+${value}`
     }
   } else {
@@ -272,6 +336,10 @@ export async function checkinEntry(entry, { index = null, delayRange = null, aut
  * 刷新条目内各账号的余额缓存（#中转列表 用）：
  * 纯 HTTP 站实时查询；AnyRouter 等浏览器站太慢，跳过用缓存。
  * 并发执行，单账号超时/失败保留旧缓存，不影响其他账号
+ *
+ * allowBrowser: false 会传给支持该选项的适配器（sub2api）：凭据过期时它本可以开浏览器
+ * 重新过码登录（一两分钟），但这里 10 秒就超时了，被丢下的浏览器任务仍会占着全局页面
+ * 槽位，把后续签到一起拖慢，所以列表刷新一律不许拉起浏览器。
  */
 const BROWSER_TYPES = new Set(['anyrouter'])
 
@@ -283,7 +351,7 @@ export async function refreshBalances(entry, { timeoutMs = 10000 } = {}) {
     try {
       // 超时后原 promise 仍会被本 race 接管（不会变成未处理拒绝），同时清掉定时器避免悬挂
       const info = await Promise.race([
-        adapter.userInfo(account),
+        adapter.userInfo(account, { allowBrowser: false }),
         new Promise((_, reject) => {
           timer = setTimeout(() => reject(new Error('刷新超时')), timeoutMs)
         })

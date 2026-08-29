@@ -154,6 +154,32 @@ function syncNewConfigKeys(userConfig) {
 }
 
 /**
+ * 锅巴等外部面板写回配置：以现有 data/config.yaml 为底（保留用户注释与自定义键），
+ * 按点号路径逐项覆盖后原子写入。路径中的纯数字段视为数组下标（如 schedule.accountDelay.0）
+ * @param {Record<string, any>} values 形如 { 'schedule.enable': true, 'proxy.hosts': ['anyrouter'] }
+ */
+export function setConfigValues(values) {
+  ensureConfigFiles()
+
+  const raw = fs.existsSync(CONFIG_PATH) ? fs.readFileSync(CONFIG_PATH, 'utf-8') : ''
+  const doc = YAML.parseDocument(raw)
+  // 空文件 parseDocument 得到 null contents，先补成映射再 setIn
+  if (!doc.contents) doc.contents = doc.createNode({})
+
+  for (const [keyPath, value] of Object.entries(values || {})) {
+    if (!keyPath) continue
+    const parts = keyPath.split('.').map(p => (/^\d+$/.test(p) ? Number(p) : p))
+    doc.setIn(parts, value)
+  }
+
+  const tmp = CONFIG_PATH + '.tmp'
+  fs.writeFileSync(tmp, doc.toString({ lineWidth: 0 }))
+  renameWithRetry(tmp, CONFIG_PATH)
+  // chokidar 的 change 事件有延迟，这里立即让缓存失效，保证保存后马上生效
+  configCache = null
+}
+
+/**
  * 读取配置（带缓存与热更新）
  */
 export function getConfig() {

@@ -120,9 +120,10 @@ export async function renderList({ nickname, userId, autoCheckin, accounts }) {
       indexText: `账号${chineseInteger(i + 1, COMMON_CN_DIGITS)}`,
       name: accountLabel(acc),
       baseUrl: acc.baseUrl,
-      typeLabel: { newapi: 'new-api', veloera: 'Veloera', generic: 'Cookie', agentrouter: 'AgentRouter', anyrouter: 'AnyRouter' }[acc.type] || acc.type,
+      typeLabel: { newapi: 'new-api', veloera: 'Veloera', generic: 'Cookie', agentrouter: 'AgentRouter', anyrouter: 'AnyRouter', sub2api: 'Sub2API' }[acc.type] || acc.type,
       tokenMasked: maskToken(acc.token),
-      credentialLabel: acc.authMode === 'email' ? '邮箱' : '令牌',
+      // Sub2API 刷新令牌绑定的账号没有邮箱密码，标明凭据种类才能看出该账号是怎么维持的
+      credentialLabel: acc.authMode === 'email' ? '邮箱' : (acc.authMode === 'refresh' ? '刷新令牌' : '令牌'),
       credentialMasked: acc.authMode === 'email' ? maskEmail(acc.loginEmail) : maskToken(acc.token),
       balance: acc.lastBalance || '-',
       checkinText: checkedToday ? '今日已签' : (uncertainToday ? '签到未确认' : '今日未签'),

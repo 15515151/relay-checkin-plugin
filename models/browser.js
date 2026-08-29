@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { DATA_PATH, getConfig } from './config.js'
 import { proxyForHost } from './adapters/common.js'
 import { assertSafeRequestUrl } from './url-security.js'
@@ -300,8 +300,12 @@ async function getBrowser(pool, proxy, { interactive = false, profileKey = '', e
   if (isBrowserAlive(pool.instance)) return pool.instance
   if (!pool.launching) {
     pool.launching = (async () => {
+      // 无桌面的 Linux 服务器：不直接放弃可见模式，先拉一个 Xvfb 虚拟屏顶上。
+      // Turnstile 在纯无头下会静默卡死，有真实显示环境（哪怕是虚拟屏）才稳定出 token；
+      // 装不上 Xvfb 时 ensureVirtualDisplay 自己抛出可读原因。
+      let virtualDisplay = null
       if (interactive && process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
-        throw new Error('当前 Linux 环境没有图形桌面（DISPLAY/WAYLAND_DISPLAY），无法打开可见浏览器')
+        virtualDisplay = await ensureVirtualDisplay()
       }
       const puppeteer = await getPuppeteer()
       const args = [
@@ -315,7 +319,17 @@ async function getBrowser(pool, proxy, { interactive = false, profileKey = '', e
         '--no-default-browser-check'
       ]
       if (interactive) {
-        args.push('--start-maximized', '--window-size=1200,860')
+        // 虚拟屏没有窗口管理器，--start-maximized 不生效，窗口尺寸只认 --window-size；
+        // 这里比虚拟屏分辨率留一圈余量，让 innerWidth/screen.width 的关系与真实桌面一致。
+        args.push('--window-size=1600,1000')
+        // 无桌面服务器（Xvfb）上没有 GPU：Chrome 136+ 默认不给软件渲染的 WebGL，
+        // 于是 canvas/WebGL 指纹整块缺失，Cloudflare 会把这种环境判成机器人。
+        // 显式打开 SwiftShader 软渲染，让 WebGL 至少能返回真实上下文。
+        args.push('--enable-unsafe-swiftshader')
+        // Wayland 桌面上默认走 Wayland 后端，xdotool 驱动不了真实指针；改走 XWayland
+        if (!virtualDisplay && process.env.WAYLAND_DISPLAY && process.env.DISPLAY) {
+          args.push('--ozone-platform=x11')
+        }
       } else {
         // 无头 WAF 页面会持续执行挑战脚本，限制单实例资源占用。
         args.push(
@@ -342,6 +356,7 @@ async function getBrowser(pool, proxy, { interactive = false, profileKey = '', e
         // 高于允许的等待上限，否则默认 120 秒的可见验证会在 90 秒被提前掐断。
         protocolTimeout: interactive ? 660000 : 150000
       }
+      if (virtualDisplay) launchOptions.env = { ...process.env, DISPLAY: virtualDisplay }
       if (executablePath) {
         launchOptions.executablePath = executablePath
         logger.info(`[relay-checkin-plugin] 使用系统浏览器内核: ${executablePath}`)
@@ -355,6 +370,9 @@ async function getBrowser(pool, proxy, { interactive = false, profileKey = '', e
           executablePath || 'puppeteer-bundled'
         )
         fs.mkdirSync(userDataDir, { recursive: true })
+        // pm2 restart / 崩溃会把上次的可见浏览器留成孤儿，它占着同一档案目录，
+        // 本次启动会被 Chrome 直接转交给它然后静默退出
+        reapProfileHolders(userDataDir, { orphanOnly: true, label: '可见浏览器' })
         logger.info(`[relay-checkin-plugin] 可见浏览器隔离档案: ${userDataDir}`)
         launchOptions.userDataDir = userDataDir
         launchOptions.defaultViewport = null
@@ -401,6 +419,8 @@ function scheduleIdleClose(pool, idleMs = null) {
       const inst = pool.instance
       pool.instance = null
       await inst?.close()
+      // 常驻可见浏览器关掉后，为它拉起的虚拟显示也该跟着回收
+      scheduleVirtualDisplayRelease()
     } catch (err) {
       logger.error(`[relay-checkin-plugin] 浏览器回收异常: ${err?.message || err}`)
     }
@@ -633,10 +653,15 @@ async function withPage(host, fn, { interactive = false, profileKey = host, trac
       logger.info('[relay-checkin-plugin] 浏览器页面就绪，开始初始化')
       // 以下都是本地 CDP 调用，正常都是毫秒级；浏览器无响应时必须超时而不是静默挂死
       if (proxy?.auth) await withTimeout(page.authenticate(proxy.auth), 15000, '设置代理认证超时')
-      await withTimeout(page.setViewport({ width: 1365, height: 900, deviceScaleFactor: 1 }), 15000, '设置浏览器窗口超时')
-      const userAgent = await withTimeout(browserUserAgent(browser), 15000, '读取浏览器版本超时')
-      await withTimeout(page.setUserAgent(userAgent), 15000, '设置 UA 超时（浏览器无响应）')
-      await withTimeout(page.setExtraHTTPHeaders({ 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' }), 15000, '设置浏览器语言超时')
+      // 可见接管（只用于 Turnstile）刻意不做任何 CDP 覆盖：真实 headful Chrome 本身
+      // 就有正常的 UA / 视口 / navigator，再叠 Emulation 视口覆盖、UA 覆盖、navigator 补丁
+      // 和请求拦截只会留下自动化痕迹——实测 Cloudflare 会直接回 600010（检测到 bot 行为）。
+      if (!interactive) {
+        await withTimeout(page.setViewport({ width: 1365, height: 900, deviceScaleFactor: 1 }), 15000, '设置浏览器窗口超时')
+        const userAgent = await withTimeout(browserUserAgent(browser), 15000, '读取浏览器版本超时')
+        await withTimeout(page.setUserAgent(userAgent), 15000, '设置 UA 超时（浏览器无响应）')
+        await withTimeout(page.setExtraHTTPHeaders({ 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' }), 15000, '设置浏览器语言超时')
+      }
       const serviceWorkerMode = await withTimeout(
         bypassServiceWorkerCompat(page),
         15000,
@@ -650,9 +675,12 @@ async function withPage(host, fn, { interactive = false, profileKey = host, trac
       } else if (serviceWorkerMode === 'unsupported') {
         logger.warn('[relay-checkin-plugin] 当前 Puppeteer 不支持禁用页面 Service Worker，已跳过该可选优化')
       }
-      await withTimeout(page.evaluateOnNewDocument(STEALTH_SCRIPT), 15000, '注入初始化脚本超时（浏览器无响应）')
-      await installNavigationGuard(page)
-      if (interactive) await withTimeout(page.bringToFront(), 15000, '显示浏览器窗口超时')
+      if (interactive) {
+        await withTimeout(page.bringToFront(), 15000, '显示浏览器窗口超时')
+      } else {
+        await withTimeout(page.evaluateOnNewDocument(STEALTH_SCRIPT), 15000, '注入初始化脚本超时（浏览器无响应）')
+        await installNavigationGuard(page)
+      }
       logger.info('[relay-checkin-plugin] 页面初始化完成')
       const out = await fn(page)
       if (trackResult) noteResult(host, browserResultOk(out))
@@ -1199,13 +1227,22 @@ export async function autoClickTurnstileCheckbox(page, timeoutSec, shouldStop) {
         logger.info('[relay-checkin-plugin] Turnstile iframe 已出现，等待内部复选框可交互')
       }
       if (target && !shouldStop()) {
-        const startX = Math.max(1, target.x - 90)
-        const startY = Math.max(1, target.y + 35)
-        await withTimeout(page.mouse.move(startX, startY), 5000, '移动鼠标到 Turnstile 前超时')
-        await withTimeout(page.mouse.move(target.x, target.y, { steps: 14 }), 5000, '移动鼠标到 Turnstile 超时')
-        await withTimeout(page.mouse.click(target.x, target.y, { delay: 120 }), 5000, '点击 Turnstile 超时')
+        // 复选框刚可交互就点会被判成脚本行为（Cloudflare 回 600010「检测到 bot」）：
+        // 真人从看到组件到勾选普遍要几秒，这里随机停顿一下再动鼠标。
+        const dwellMs = 3500 + Math.floor(Math.random() * 3000)
+        await new Promise(resolve => setTimeout(resolve, dwellMs))
+        if (shouldStop()) return false
+        let how = 'xdotool 真实指针'
+        if (!await nativePointerClick(page, target)) {
+          how = 'CDP 注入事件'
+          const startX = Math.max(1, target.x - 90)
+          const startY = Math.max(1, target.y + 35)
+          await withTimeout(page.mouse.move(startX, startY), 5000, '移动鼠标到 Turnstile 前超时')
+          await withTimeout(page.mouse.move(target.x, target.y, { steps: 14 }), 5000, '移动鼠标到 Turnstile 超时')
+          await withTimeout(page.mouse.click(target.x, target.y, { delay: 120 }), 5000, '点击 Turnstile 超时')
+        }
         await setTurnstilePanelStatus(page, '已自动点击验证，等待 Cloudflare 确认...')
-        logger.info(`[relay-checkin-plugin] 已在复选框可交互后自动点击 Turnstile（x=${target.x.toFixed(1)}, y=${target.y.toFixed(1)}）`)
+        logger.info(`[relay-checkin-plugin] 已在复选框可交互后等待 ${(dwellMs / 1000).toFixed(1)} 秒并用${how}点击 Turnstile（x=${target.x.toFixed(1)}, y=${target.y.toFixed(1)}）`)
         return true
       }
     } catch (err) {
@@ -1228,8 +1265,173 @@ export async function autoClickTurnstileCheckbox(page, timeoutSec, shouldStop) {
   return false
 }
 
-async function turnstileRetrySequence(page) {
-  return await withTimeout(
+/**
+ * 虚拟屏上用真实指针点击。CDP 的 Input.dispatchMouseEvent 是注入事件，
+ * Cloudflare 能从「没有任何 OS 级原始输入」认出自动化（实测回 600010 检测到 bot 行为）；
+ * 有 Xvfb 时改用 xdotool 驱动 X server 自己的指针，事件路径与真人完全一致。
+ * xdotool 缺失或调用失败返回 false，由调用方退回 CDP 点击。
+ */
+let nativeClickUnavailable = false
+
+/**
+ * 用 xdotool 在指定 display 上把真实指针移到屏幕坐标并点击。
+ * @returns {Promise<boolean>} 点击是否成功执行
+ */
+export function xdotoolClick(display, x, y, { windowId = '' } = {}) {
+  if (!display || nativeClickUnavailable) return Promise.resolve(false)
+  const argv = []
+  // 同一虚拟屏上可能同时开着别的窗口（并发签到、常驻可见实例），它们都在 (0,0)
+  // 互相遮挡；先把目标窗口抬到最前，屏幕坐标点击才会落到它身上。
+  // windowraise 直接调 XRaiseWindow，不需要窗口管理器
+  if (windowId) argv.push('windowraise', windowId, 'sleep', '0.20')
+  const steps = 6
+  const fromX = x - 120 - Math.floor(Math.random() * 60)
+  const fromY = y + 70 + Math.floor(Math.random() * 40)
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps
+    const jitter = i < steps ? () => Math.round(Math.random() * 6 - 3) : () => 0
+    argv.push(
+      'mousemove',
+      String(Math.round(fromX + (x - fromX) * t) + jitter()),
+      String(Math.round(fromY + (y - fromY) * t) + jitter()),
+      'sleep', (0.03 + Math.random() * 0.05).toFixed(3)
+    )
+  }
+  // 指针到位后再停顿一下才按下，避免「移动即点击」的机械特征
+  argv.push('sleep', (0.25 + Math.random() * 0.35).toFixed(3), 'click', '1')
+
+  return new Promise(resolve => {
+    let settled = false
+    const finish = value => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    }
+    const proc = spawn('xdotool', argv, {
+      env: { ...process.env, DISPLAY: display },
+      stdio: 'ignore'
+    })
+    const timer = setTimeout(() => {
+      try { proc.kill() } catch { /* 已退出 */ }
+      finish(false)
+    }, 15000)
+    proc.once('error', err => {
+      if (err?.code === 'ENOENT') {
+        nativeClickUnavailable = true
+        logger.warn('[relay-checkin-plugin] 未安装 xdotool，无法在虚拟屏上自动勾选人机验证（建议执行 apt install xdotool）')
+      }
+      finish(false)
+    })
+    proc.once('exit', code => finish(code === 0))
+  })
+}
+
+async function nativePointerClick(page, target) {
+  const display = pointerDisplayFor(xvfbProc?.display)
+  if (!display || nativeClickUnavailable) return false
+  let geom = null
+  try {
+    geom = await withTimeout(page.evaluate(() => ({
+      screenX: window.screenX,
+      screenY: window.screenY,
+      frameW: window.outerWidth - window.innerWidth,
+      frameH: window.outerHeight - window.innerHeight
+    })), 5000, '读取浏览器窗口位置超时')
+  } catch {
+    return false
+  }
+  return await xdotoolClick(display, ...viewportToScreen(geom, target.x, target.y))
+}
+
+/**
+ * 视口坐标 → 屏幕坐标：窗口位置 + 左右边框的一半 + 标签栏/地址栏高度。
+ * 实测（Xvfb 1920x1080 + Chrome 147）换算误差为 0。
+ */function viewportToScreen(geom, x, y) {
+  return [
+    Math.round(geom.screenX + Math.max(0, geom.frameW / 2) + x),
+    Math.round(geom.screenY + Math.max(0, geom.frameH) + y)
+  ]
+}
+
+/**
+ * 决定 xdotool 该在哪个 display 上驱动指针。
+ *
+ * 机器本身有图形桌面时不会去起 Xvfb（ensureVirtualDisplay 直接返回 null），但那台机器
+ * 的桌面同样有真实指针可用——以前这种情况一律要求用户自己动手点，其实没必要。
+ * Wayland 桌面只有在 XWayland 也开着（DISPLAY 存在）时才驱动得动，此时要让 Chrome 走 X11。
+ * @param {string|null} virtualDisplay 本插件自己拉起的 Xvfb display
+ * @returns {string} 可用于 xdotool 的 display，空串表示只能手动点
+ */
+export function pointerDisplayFor(virtualDisplay) {
+  if (virtualDisplay) return virtualDisplay
+  if (process.platform !== 'linux') return ''
+  return process.env.DISPLAY || ''
+}
+
+/**
+ * 用 xdotool 问 X server 要窗口的真实几何与窗口 id。
+ *
+ * Chrome 自报的 outerHeight - innerHeight 在没有窗口管理器的 Xvfb 上并不可靠
+ * （不同大版本行为不一致，为 0 时算出的点击点会整体偏上，正好落在提示文字上——
+ * 于是「点了却毫无反应」，Turnstile 连 error-callback 都不会触发）。X server 的数据不会骗人。
+ * @returns {Promise<{windowId:string,x:number,y:number,width:number,height:number}|null>}
+ */
+export function xdotoolWindowGeometry(display, title) {
+  if (!display || nativeClickUnavailable) return Promise.resolve(null)
+  return new Promise(resolve => {
+    let proc = null
+    try {
+      proc = spawn('xdotool', ['search', '--onlyvisible', '--name', title, 'getwindowgeometry', '--shell'], {
+        env: { ...process.env, DISPLAY: display },
+        stdio: ['ignore', 'pipe', 'ignore']
+      })
+    } catch {
+      resolve(null)
+      return
+    }
+    let out = ''
+    let settled = false
+    const finish = value => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try { proc.kill() } catch { /* 已退出 */ }
+      resolve(value)
+    }
+    const timer = setTimeout(() => finish(null), 8000)
+    proc.stdout.on('data', chunk => { out += String(chunk) })
+    proc.once('error', () => finish(null))
+    proc.once('exit', () => {
+      // 匹配到多个窗口时 xdotool 会按窗口依次输出各自的 WINDOW/X/Y/WIDTH/HEIGHT，取最后一组
+      const pick = key => {
+        const all = [...out.matchAll(new RegExp(`^${key}=(-?\\d+)$`, 'gm'))]
+        return all.length ? Number(all.at(-1)[1]) : null
+      }
+      const width = pick('WIDTH')
+      const height = pick('HEIGHT')
+      const windowId = pick('WINDOW')
+      finish(width && height
+        ? { windowId: windowId ? String(windowId) : '', x: pick('X') || 0, y: pick('Y') || 0, width, height }
+        : null)
+    })
+  })
+}
+
+/**
+ * 用 X server 实测的窗口几何 + 页面自报的视口尺寸，算出视口原点的屏幕坐标。
+ * 数据不全或明显不合理时返回 null，由调用方退回 Chrome 自报的换算。
+ */
+export function detachedClickOrigin(geom, windowGeom) {
+  if (!windowGeom || !geom?.innerHeight || !geom?.innerWidth) return null
+  const frameH = windowGeom.height - geom.innerHeight
+  const frameW = Math.max(0, Math.round((windowGeom.width - geom.innerWidth) / 2))
+  // 标签栏 + 地址栏在 200px 以内才算可信；超出说明找到的不是那个窗口
+  if (frameH < 0 || frameH > 200) return null
+  return { x: windowGeom.x + frameW, y: windowGeom.y + frameH }
+}
+
+async function turnstileRetrySequence(page) {  return await withTimeout(
     page.evaluate(() => Number(document.getElementById('relay-checkin-turnstile-status')?.dataset.retry || 0)),
     5000,
     '读取 Turnstile 重试状态超时'
@@ -1460,6 +1662,117 @@ export async function solveTurnstile(page, siteKey, timeoutSec, { interactive = 
   }
 }
 
+/**
+ * 脱离 CDP 的验证面板在页面里的固定位置。主进程断开调试连接后无法再查询元素坐标，
+ * 只能把组件钉死在这里，再按窗口几何换算出屏幕坐标去点。
+ * 复选框位于 widget 左上角内约 (30, 32)。
+ */
+const DETACHED_WIDGET = { left: 240, top: 300, boxX: 30, boxY: 32 }
+
+/**
+ * 页面内自治的「过码 + 签到」脚本，在 document-start 注入。
+ *
+ * 主进程会在导航后断开 CDP（Cloudflare 能感知调试会话，attach 期间挑战必被判 bot），
+ * 之后就无法再操作页面，所以重试、提交、状态提示全部由这段脚本自己完成，
+ * 结果写在 window.__relayCheckin 上，等挑战结束后主进程重连 CDP 取回。
+ */
+function detachedTurnstilePageScript(cfg) {
+  const state = { round: 0, log: [], result: null }
+  window.__relayCheckin = state
+  const log = (step, extra) => state.log.push({ at: Date.now(), step, ...(extra || {}) })
+
+  const start = () => {
+    // 固定标题：断开 CDP 后只能靠 xdotool 按标题找回这个窗口（读几何、抬到最前）
+    try { document.title = cfg.windowTag } catch (err) { /* 少数站点锁死 title */ }
+    const overlay = document.createElement('div')
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:#f4f2ec;'
+      + 'font-family:"Microsoft YaHei","PingFang SC",sans-serif;color:#1d2b23'
+    const tip = document.createElement('div')
+    tip.style.cssText = `position:fixed;left:${cfg.left}px;top:${cfg.top - 92}px;max-width:520px;`
+      + 'font-size:17px;line-height:1.7;z-index:2147483647'
+    tip.textContent = `${cfg.title}：请勾选下方的「我是人类」，验证通过后会自动提交签到。`
+    const status = document.createElement('div')
+    status.style.cssText = `position:fixed;left:${cfg.left}px;top:${cfg.top + 90}px;max-width:520px;`
+      + 'font-size:15px;line-height:1.7;color:#4b6152;z-index:2147483647'
+    status.textContent = '正在加载验证组件...'
+    const holder = document.createElement('div')
+    holder.style.cssText = `position:fixed;left:${cfg.left}px;top:${cfg.top}px;z-index:2147483647`
+    overlay.append(tip, holder, status)
+    document.body.appendChild(overlay)
+
+    const submit = async token => {
+      log('token', { len: token.length })
+      status.textContent = '验证通过，正在提交签到...'
+      try {
+        const url = cfg.checkinUrl + (cfg.checkinUrl.includes('?') ? '&' : '?')
+          + 'turnstile=' + encodeURIComponent(token)
+        const res = await fetch(url, { method: 'POST', headers: cfg.headers, credentials: 'include' })
+        const text = await res.text()
+        let json = null
+        try { json = JSON.parse(text) } catch (err) { json = null }
+        state.result = { status: res.status, json, body: json ? '' : text.slice(0, 300) }
+        status.textContent = json?.message || `签到请求已完成（HTTP ${res.status}）`
+        log('submitted', { status: res.status })
+      } catch (err) {
+        state.result = { status: 0, json: null, error: String(err?.message || err).slice(0, 200) }
+        status.textContent = '签到请求发送失败'
+        log('submit-failed')
+      }
+    }
+
+    let widgetId = null
+    let retries = 0
+    const giveUp = code => {
+      state.result = { status: 0, json: null, turnstileError: code }
+      status.textContent = `验证未通过（${code}），已放弃`
+    }
+    const onFail = code => {
+      log('challenge-failed', { code })
+      if (retries >= cfg.maxRetries) return giveUp(code)
+      retries++
+      status.textContent = `验证未通过（${code}），正在重试 ${retries}/${cfg.maxRetries}...`
+      // round 自增让主进程知道组件已复位、需要再点一次复选框
+      setTimeout(() => {
+        try {
+          window.turnstile.reset(widgetId)
+          state.round++
+        } catch (err) {
+          giveUp(code)
+        }
+      }, 1500)
+    }
+    const render = () => {
+      try {
+        widgetId = window.turnstile.render(holder, {
+          sitekey: cfg.siteKey,
+          theme: 'light',
+          callback: submit,
+          'error-callback': code => onFail(String(code)),
+          'timeout-callback': () => onFail('timeout'),
+          'expired-callback': () => onFail('expired')
+        })
+        state.round = 1
+        status.textContent = '请勾选复选框完成验证'
+      } catch (err) {
+        giveUp('render-error')
+      }
+    }
+
+    if (window.turnstile?.render) return render()
+    const s = document.createElement('script')
+    s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
+    s.onload = () => {
+      log('api-loaded')
+      render()
+    }
+    s.onerror = () => giveUp('api-load-failed')
+    document.head.appendChild(s)
+  }
+
+  if (document.readyState === 'loading') addEventListener('DOMContentLoaded', start)
+  else start()
+}
+
 function turnstileFailureMessage(result, timeoutSec, interactive = false) {
   if (result?.reason === 'error-callback') {
     if (/^[36]\d{5}$/.test(result.errorCode || '')) {
@@ -1473,6 +1786,488 @@ function turnstileFailureMessage(result, timeoutSec, interactive = false) {
   return interactive
     ? `Turnstile 在 ${timeoutSec} 秒内未完成，请在机器人运行设备弹出的浏览器窗口中完成验证`
     : `Turnstile 在 ${timeoutSec} 秒内未签发 token（无头浏览器未获放行）`
+}
+
+const waitMs = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+/**
+ * 找出正在占用某个浏览器档案目录的进程。
+ *
+ * Chrome 发现同一 --user-data-dir 已有实例时，会把命令行交给旧实例后自己静默退出
+ * （stderr 只有一行「正在现有的浏览器会话中打开」）。而 Puppeteer 13 用 readline 收
+ * stderr 却在进程 exit 时就 reject，那行输出往往还没被读到，于是只剩一句
+ * "Failed to launch the browser process!"，无从判断原因。所以这里自己找持有者。
+ * @param {string} userDataDir 档案目录
+ * @param {boolean} orphanOnly 只算父进程已消失的（pm2 restart / 崩溃留下的孤儿）
+ */
+export function profileHolderPids(userDataDir, { orphanOnly = false } = {}) {
+  if (process.platform === 'win32') return []
+  try {
+    const out = spawnSync('ps', ['-eo', 'pid=,ppid=,args='], { encoding: 'utf8', timeout: 5000 })
+    if (out.status !== 0 || !out.stdout) return []
+    const needle = `--user-data-dir=${userDataDir}`
+    const pids = []
+    for (const line of out.stdout.split('\n')) {
+      const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/)
+      if (!m) continue
+      const pid = Number(m[1])
+      if (pid === process.pid) continue
+      if (orphanOnly && m[2] !== '1') continue
+      // 目录末段是内容哈希，不会与别的路径互为前缀；后面紧跟空格或行尾才算同一目录
+      const idx = m[3].indexOf(needle)
+      if (idx < 0) continue
+      const next = m[3][idx + needle.length]
+      if (next && next !== ' ') continue
+      pids.push(pid)
+    }
+    return pids
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 清掉占用档案目录的残留浏览器。一次性档案（#detached）只服务单次流程，启动前不该有
+ * 任何持有者；池化档案只回收孤儿，避免动到同机另一个 Yunzai 实例正在用的窗口。
+ * @returns {number} 实际清理掉的进程数
+ */
+export function reapProfileHolders(userDataDir, { orphanOnly = false, label = '浏览器' } = {}) {
+  let killed = 0
+  for (const pid of profileHolderPids(userDataDir, { orphanOnly })) {
+    try {
+      process.kill(pid, 'SIGKILL')
+      killed++
+    } catch { /* 已退出或无权限 */ }
+  }
+  if (killed) {
+    logger.info(`[relay-checkin-plugin] 已清理占用${label}档案的残留进程（${killed} 个）：`
+      + '这类残留会让 Chrome 把新窗口交给旧实例后静默退出，导致此后每次启动都失败')
+  }
+  return killed
+}
+
+/**
+ * 重连 CDP 读一次页面里的自治状态。读完立刻断开，尽量缩短 attach 时间：
+ * 挑战已经结束时 attach 无害，但仍在等待时被 attach 会直接判 bot。
+ */
+async function probeDetachedState(ws, host) {
+  let browser = null
+  try {
+    const puppeteer = await getPuppeteer()
+    browser = await withTimeout(
+      puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: null }),
+      15000, '重连浏览器超时'
+    )
+    const pages = await withTimeout(browser.pages(), 15000, '读取页面列表超时')
+    const page = pages.find(p => {
+      try { return new URL(p.url()).hostname === host } catch { return false }
+    }) || pages[0]
+    if (!page) return null
+    return await withTimeout(page.evaluate(() => {
+      const s = window.__relayCheckin
+      return s ? { round: s.round, result: s.result, log: s.log } : null
+    }), 15000, '读取验证状态超时')
+  } catch {
+    return null
+  } finally {
+    try { browser?.disconnect() } catch { /* 已断开 */ }
+  }
+}
+
+async function closeDetachedBrowser(ws, proc) {
+  try {
+    const puppeteer = await getPuppeteer()
+    const browser = await withTimeout(
+      puppeteer.connect({ browserWSEndpoint: ws }), 10000, '重连浏览器超时'
+    )
+    await withTimeout(browser.close(), 15000, '关闭浏览器超时')
+    return
+  } catch { /* 连不上就直接杀进程 */ }
+  try { proc?.kill('SIGKILL') } catch { /* 已退出 */ }
+}
+
+/**
+ * 读虚拟屏上指针的最终落点。点击「执行成功」但页面毫无反应时，
+ * 这一个坐标就能区分「点歪了」和「点对了但组件没反应」。
+ */
+function xdotoolMouseLocation(display) {
+  if (!display || nativeClickUnavailable) return Promise.resolve('')
+  return new Promise(resolve => {
+    let proc = null
+    try {
+      proc = spawn('xdotool', ['getmouselocation', '--shell'], {
+        env: { ...process.env, DISPLAY: display },
+        stdio: ['ignore', 'pipe', 'ignore']
+      })
+    } catch {
+      resolve('')
+      return
+    }
+    let out = ''
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try { proc.kill() } catch { /* 已退出 */ }
+      const x = out.match(/^X=(-?\d+)$/m)?.[1]
+      const y = out.match(/^Y=(-?\d+)$/m)?.[1]
+      resolve(x && y ? `(${x}, ${y})` : '')
+    }
+    const timer = setTimeout(finish, 5000)
+    proc.stdout.on('data', chunk => { out += String(chunk) })
+    proc.once('error', finish)
+    proc.once('exit', finish)
+  })
+}
+
+/**
+ * 断开状态下的失败几乎没有可观测性：主进程没接管页面，也没人在窗口前看着。
+ * 超时收尾时重连 CDP 留一份现场（这时挑战已经废了，attach 不再有副作用）：
+ * 页面自治脚本的步骤日志、Turnstile 组件的实际位置、token 是否签发、指针最终落点，
+ * 再存一张截图。远端用户只要把这几行日志发回来就能定性。
+ */
+export async function dumpDetachedFailure(ws, host, display) {
+  let browser = null
+  try {
+    const puppeteer = await getPuppeteer()
+    browser = await withTimeout(
+      puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: null }),
+      15000, '重连浏览器超时'
+    )
+    const pages = await withTimeout(browser.pages(), 15000, '读取页面列表超时')
+    const page = pages.find(item => {
+      try { return new URL(item.url()).hostname === host } catch { return false }
+    }) || pages[0]
+    if (!page) return
+
+    const snapshot = await withTimeout(page.evaluate(() => {
+      const state = window.__relayCheckin
+      const iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]')
+      const rect = iframe?.getBoundingClientRect()
+      const input = document.querySelector('input[name="cf-turnstile-response"]')
+      return {
+        round: state?.round ?? null,
+        steps: (state?.log || []).map(item => (item.code ? `${item.step}(${item.code})` : item.step)),
+        title: document.title,
+        iframe: rect
+          ? `${Math.round(rect.width)}x${Math.round(rect.height)} @视口(${Math.round(rect.x)},${Math.round(rect.y)})`
+          : '未渲染',
+        tokenLen: input?.value?.length || 0
+      }
+    }), 15000, '读取验证现场超时')
+
+    const mouse = await xdotoolMouseLocation(display)
+    logger.warn(`[relay-checkin-plugin] ${host} 验证现场: 挑战轮次=${snapshot.round}`
+      + `｜页面步骤=[${snapshot.steps.join(' → ') || '无'}]`
+      + `｜Turnstile 组件=${snapshot.iframe}｜token 长度=${snapshot.tokenLen}`
+      + `｜指针停在=${mouse || '未知'}｜标题=${snapshot.title}`)
+
+    const dir = path.join(DATA_PATH, 'turnstile-debug')
+    fs.mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, `${Date.now()}-${host}.png`)
+    await withTimeout(page.screenshot({ path: file }), 20000, '截图超时')
+    logger.warn(`[relay-checkin-plugin] 现场截图已保存: ${file}`)
+    // 只留最近 5 张，文件名以时间戳开头，字典序即时间序
+    const shots = fs.readdirSync(dir).filter(name => name.endsWith('.png')).sort()
+    for (const name of shots.slice(0, Math.max(0, shots.length - 5))) {
+      try { fs.unlinkSync(path.join(dir, name)) } catch { /* 已被清理 */ }
+    }
+  } catch (err) {
+    logger.warn(`[relay-checkin-plugin] 取回 ${host} 验证现场失败: ${err?.message || err}`)
+  } finally {
+    try { browser?.disconnect() } catch { /* 已断开 */ }
+  }
+}
+
+function detachedResultToOutcome(result, timeoutSec) {
+  if (result.turnstileError) {
+    return {
+      turnstileFailed: true,
+      message: turnstileFailureMessage(
+        { reason: 'error-callback', errorCode: result.turnstileError }, timeoutSec, true
+      ),
+      detail: result
+    }
+  }
+  if (!result.status) {
+    return {
+      turnstileFailed: true,
+      message: `验证已通过但签到请求发送失败：${result.error || '未知原因'}`,
+      detail: result
+    }
+  }
+  return { status: result.status, json: result.json }
+}
+
+/**
+ * Puppeteer 13（TRSS-Yunzai 内置的版本）在启动失败时会把 Chrome 的 stderr 一起丢掉，
+ * 只留一句 "Failed to launch the browser process!"。这里用同一套参数亲手跑一次 Chrome，
+ * 把第一行真实错误抓出来，让远端日志能给出可读原因。探测进程最多活 6 秒。
+ * @returns {Promise<string>} 可读原因，抓不到时为空串
+ */
+export function probeChromeLaunchStderr(executablePath, args, env) {
+  return new Promise(resolve => {
+    if (!executablePath) {
+      resolve('')
+      return
+    }
+    let proc = null
+    try {
+      // 独立进程组：Chrome 真起来了要连渲染子进程一起收掉，否则探测自己就变成新的占用者
+      proc = spawn(executablePath, [...args, '--remote-debugging-port=0', 'about:blank'], {
+        stdio: ['ignore', 'ignore', 'pipe'], env, detached: true
+      })
+    } catch (err) {
+      resolve(String(err?.message || err))
+      return
+    }
+    let text = ''
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try { process.kill(-proc.pid, 'SIGKILL') } catch {
+        try { proc.kill('SIGKILL') } catch { /* 已退出 */ }
+      }
+      const lines = text.split('\n').map(item => item.trim()).filter(Boolean)
+      resolve(
+        lines.find(item => !item.startsWith('[') && !item.startsWith('DevTools listening'))
+        || lines.find(item => /:(ERROR|FATAL):/.test(item))
+        || ''
+      )
+    }
+    const timer = setTimeout(finish, 6000)
+    proc.stderr.on('data', chunk => {
+      text += String(chunk)
+      // 起得来会先打 DevTools listening，起不来则第一行就是原因，两种情况都不用等满 6 秒
+      if (text.includes('\n')) setTimeout(finish, 300)
+    })
+    proc.once('error', err => {
+      text += String(err?.message || err)
+      finish()
+    })
+    proc.once('exit', () => setTimeout(finish, 200))
+  })
+}
+
+/**
+ * 启动一次性可见浏览器。这一步失败只能退回附着 CDP 的旧模式，而那条路在 Turnstile
+ * 站点几乎必然被判机器人（用户要白等一个完整超时），所以宁可在这里多花几秒：
+ * 启动前先清掉占用档案的残留实例，失败后探明真实原因、再清一次、重试一次。
+ */
+export async function launchDetachedBrowser(puppeteer, launchOptions, { host, executablePath }) {
+  const userDataDir = launchOptions.userDataDir
+  const label = `${host} 的一次性`
+  reapProfileHolders(userDataDir, { label })
+  let lastErr = null
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const launching = puppeteer.launch(launchOptions)
+    try {
+      return await withTimeout(launching, 70000, '浏览器启动超时（检查 Chrome 与虚拟显示是否可用）')
+    } catch (err) {
+      lastErr = err
+      // 超时只是本进程放弃等待，Chrome 可能随后才起来：不收掉它，档案目录就被永久占住，
+      // 之后每次启动都会静默失败——这正是「某次超时之后再也起不来」的成因
+      launching.then(browser => browser.close().catch(() => {})).catch(() => {})
+      if (attempt === 2) break
+      const reason = await probeChromeLaunchStderr(
+        executablePath,
+        [...launchOptions.args, `--user-data-dir=${userDataDir}`],
+        launchOptions.env || process.env
+      )
+      if (reason) logger.warn(`[relay-checkin-plugin] Chrome 启动失败的真实原因: ${reason}`)
+      const cleaned = reapProfileHolders(userDataDir, { label })
+      logger.info(`[relay-checkin-plugin] 重试启动 ${host} 的可见浏览器（第 2 次）`)
+      await waitMs(cleaned ? 1500 : 500)
+    }
+  }
+  throw lastErr
+}
+
+/**
+ * 在浏览器与主进程断开连接的状态下过 Turnstile 并提交签到。
+ *
+ * 关键结论（实测 kktoken.cc / New API rc.25）：只要 CDP 处于 attach 状态，同一环境下
+ * Turnstile 一律回 600010（检测到 bot 行为）——出口 IP、UA、stealth 脚本、点击方式都不是主因；
+ * 一旦 browser.disconnect()，同样的页面立刻签发 token。所以这里把流程拆成三段：
+ * ① attach 状态下注入自治脚本并导航（此时还没有挑战在跑）；
+ * ② 断开 CDP，用 xdotool 驱动真实指针点复选框，页面自己完成挑战并提交签到；
+ * ③ 挑战结束后重连 CDP 取回结果。
+ *
+ * 无虚拟屏/无 xdotool 时不自动点击，退化为「用户在弹出的窗口里手动勾选」。
+ */
+async function detachedTurnstileCheckin(account, { checkinPath, headers, validationHeaders, siteKey }, timeoutSec) {
+  const cfg = getConfig()
+  const safeUrl = await assertSafeRequestUrl(account.baseUrl)
+  const host = safeUrl.hostname
+  const checkinUrl = new URL(checkinPath, `${account.baseUrl}/`)
+  await assertSafeRequestUrl(checkinUrl.toString())
+
+  checkBreaker(host)
+  await acquirePageSlot()
+  let ws = ''
+  let chromeProc = null
+  try {
+    const display = await ensureVirtualDisplay()
+    const pointerDisplay = pointerDisplayFor(display)
+    const puppeteer = await getPuppeteer()
+    const proxy = parseProxy(proxyForHost(host, true))
+    const executablePath = resolveBrowserExecutable(cfg.browser.executablePath)
+    // 与 Sub2API 同一套「干净配方」：不加任何额外伪装或降级开关
+    const args = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
+      '--lang=zh-CN',
+      '--no-first-run',
+      '--no-default-browser-check',
+      // 虚拟屏没有窗口管理器，窗口尺寸只认 --window-size；留一圈余量让
+      // innerWidth/screen.width 的关系与真实桌面一致
+      '--window-size=1600,1000',
+      // Xvfb 无 GPU，软件光栅化 WebGL（否则 WebGL 探针直接失败）
+      '--enable-unsafe-swiftshader'
+    ]
+    if (!display && process.env.WAYLAND_DISPLAY && pointerDisplay) {
+      // Wayland 桌面：默认会走 Wayland 后端，xdotool 驱动不了；改走 XWayland 才能自动勾选
+      args.push('--ozone-platform=x11')
+    }
+    if (proxy?.server) {
+      args.push(`--proxy-server=${proxy.server}`, '--proxy-bypass-list=<-loopback>')
+    }
+    const launchOptions = {
+      headless: false,
+      args,
+      ignoreDefaultArgs: ['--enable-automation'],
+      defaultViewport: null,
+      timeout: 60000,
+      protocolTimeout: (timeoutSec + 120) * 1000,
+      // 独立 profile：常驻可见浏览器可能正持有池化 profile 的目录锁，共用会让本次启动失败
+      userDataDir: interactiveProfilePath(`${host}#detached`, proxy?.server, executablePath || 'puppeteer-bundled')
+    }
+    if (executablePath) launchOptions.executablePath = executablePath
+    if (display) launchOptions.env = { ...process.env, DISPLAY: display }
+    // Puppeteer 13 不会替调用方建档案目录，交给 Chrome 自己创建时失败只会静默退出
+    fs.mkdirSync(launchOptions.userDataDir, { recursive: true })
+
+    const browser = await launchDetachedBrowser(puppeteer, launchOptions, { host, executablePath })
+    chromeProc = browser.process()
+    ws = browser.wsEndpoint()
+
+    let geom = null
+    try {
+      const page = await newPageSafe(browser, 30000, { reuseBlank: true })
+      if (proxy?.auth) await withTimeout(page.authenticate(proxy.auth), 15000, '设置代理认证超时')
+      await injectSessionCookies(page, host, headers)
+      await withTimeout(page.setBypassCSP(true), 15000, '设置 Turnstile 页面策略超时')
+      await withTimeout(page.evaluateOnNewDocument(detachedTurnstilePageScript, {
+        siteKey,
+        checkinUrl: checkinUrl.toString(),
+        headers: validationHeaders,
+        left: DETACHED_WIDGET.left,
+        top: DETACHED_WIDGET.top,
+        title: `${account.name || host} 签到验证`,
+        windowTag: `relay-checkin ${host}`,
+        maxRetries: 2
+      }), 15000, '注入验证脚本超时')
+      await navigateForTurnstile(page, account.baseUrl)
+      geom = await withTimeout(page.evaluate(() => ({
+        screenX: window.screenX,
+        screenY: window.screenY,
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        outerWidth: window.outerWidth,
+        outerHeight: window.outerHeight,
+        frameW: window.outerWidth - window.innerWidth,
+        frameH: window.outerHeight - window.innerHeight
+      })), 15000, '读取浏览器窗口位置超时')
+    } finally {
+      // 无论导航成败都要脱离 CDP，attach 状态下挑战一定过不去
+      try { browser.disconnect() } catch { /* 已断开 */ }
+    }
+
+    const viewX = DETACHED_WIDGET.left + DETACHED_WIDGET.boxX
+    const viewY = DETACHED_WIDGET.top + DETACHED_WIDGET.boxY
+    // 断开 CDP 后再问 X server 要窗口几何：这是唯一不依赖 Chrome 自报数据的坐标来源
+    const windowGeom = await xdotoolWindowGeometry(pointerDisplay, `relay-checkin ${host}`)
+    const origin = detachedClickOrigin(geom, windowGeom)
+    const [boxX, boxY] = origin
+      ? [origin.x + viewX, origin.y + viewY]
+      : (geom ? viewportToScreen(geom, viewX, viewY) : [viewX, viewY])
+    const autoClick = Boolean(pointerDisplay) && !nativeClickUnavailable
+    logger.info(`[relay-checkin-plugin] ${host} 已断开调试连接进入人机验证，`
+      + `${autoClick ? '将自动勾选复选框' : '请在弹出的浏览器窗口中手动勾选'}（最多 ${timeoutSec} 秒）`)
+    if (autoClick) {
+      logger.info(`[relay-checkin-plugin] 复选框屏幕坐标 (${boxX}, ${boxY})｜`
+        + `显示环境: ${display ? `虚拟屏 ${display}` : `本机桌面 ${pointerDisplay}（勾选时会短暂占用鼠标指针）`}｜`
+        + `依据: ${origin ? `X server 实测窗口 ${windowGeom.width}x${windowGeom.height} @(${windowGeom.x},${windowGeom.y})` : '页面自报（xdotool 未取到窗口几何）'}｜`
+        + `页面 inner ${geom?.innerWidth}x${geom?.innerHeight} outer ${geom?.outerWidth}x${geom?.outerHeight}`)
+    }
+
+    const deadline = Date.now() + timeoutSec * 1000
+    let clickedRound = 0
+    let round = 1
+    let firstProbe = true
+    let probeMisses = 0
+    let reportedProgress = false
+    while (Date.now() < deadline) {
+      if (autoClick && round > clickedRound) {
+        // 组件渲染完还要「像人一样」停一会儿再点：立刻点击本身就是行为特征。
+        // 首轮还要留出 api.js 加载 + render 的时间，点在未就绪的组件上会直接判失败。
+        await waitMs((clickedRound === 0 ? 6000 : 3500) + Math.floor(Math.random() * 3000))
+        if (await xdotoolClick(pointerDisplay, boxX, boxY, { windowId: windowGeom?.windowId })) {
+          clickedRound = round
+          logger.info(`[relay-checkin-plugin] 已用 xdotool 点击 ${host} 的验证复选框（第 ${round} 次挑战）`)
+        }
+      }
+      // 探测要重连 CDP，attach 本身会让正在进行的挑战被判 bot，所以第一次探测
+      // 必须等过 token 的正常签发耗时（实测 7~8 秒），之后也保持低频
+      await waitMs(firstProbe ? 15000 : 6000)
+      firstProbe = false
+      const state = await probeDetachedState(ws, host)
+      if (state?.result) {
+        logger.info(`[relay-checkin-plugin] ${host} 页面内验证流程结束: `
+          + (state.log || []).map(item => (item.code ? `${item.step}(${item.code})` : item.step)).join(' → '))
+        return detachedResultToOutcome(state.result, timeoutSec)
+      }
+      // 读不到状态和「读到了但挑战还没结束」是两码事，日志里必须能分开：
+      // 前者说明浏览器或注入脚本出了问题，后者只是还在等 Cloudflare
+      if (!state) {
+        probeMisses++
+        if (probeMisses === 1 || probeMisses % 5 === 0) {
+          logger.warn(`[relay-checkin-plugin] 读不到 ${host} 页面内的验证状态（第 ${probeMisses} 次），`
+            + '可能是窗口已关闭或注入脚本未生效')
+        }
+        // 一次都没读到过、又连续失败一分钟：窗口或注入脚本已经废了，
+        // 没必要把剩下的超时耗完（探测失败说明没连上，不存在打断挑战的风险）
+        if (!reportedProgress && probeMisses >= 10) {
+          await dumpDetachedFailure(ws, host, pointerDisplay)
+          return {
+            turnstileFailed: true,
+            message: '无法与人机验证窗口通信（浏览器窗口异常退出或注入脚本未生效）',
+            detail: { stage: 'detached', reason: 'probe-unreachable', probeMisses }
+          }
+        }
+      } else if (!reportedProgress) {
+        reportedProgress = true
+        logger.info(`[relay-checkin-plugin] ${host} 验证进行中: 轮次=${state.round}`
+          + `｜步骤=[${(state.log || []).map(item => (item.code ? `${item.step}(${item.code})` : item.step)).join(' → ') || '无'}]`)
+      }
+      if (state?.round) round = state.round
+    }
+    await dumpDetachedFailure(ws, host, pointerDisplay)
+    return {
+      turnstileFailed: true,
+      message: `Turnstile 在 ${timeoutSec} 秒内未完成${autoClick ? '' : '，请在机器人运行设备弹出的浏览器窗口中完成验证'}`,
+      detail: { stage: 'detached', reason: 'timeout' }
+    }
+  } finally {
+    if (ws || chromeProc) await closeDetachedBrowser(ws, chromeProc)
+    scheduleVirtualDisplayRelease()
+    releasePageSlot()
+  }
 }
 
 /**
@@ -1545,17 +2340,31 @@ export async function turnstileCheckin(account, { checkinPath, headers, validati
     logger.info(`[relay-checkin-plugin] 将直接打开可见浏览器处理 ${host}，请在机器人运行设备上于 ${interactiveTimeoutSec} 秒内完成验证`)
     let interactive
     try {
-      interactive = await runTurnstileAttempt(
+      interactive = await detachedTurnstileCheckin(
         account,
         { checkinPath, headers, validationHeaders, siteKey },
-        { interactive: true, timeoutSec: interactiveTimeoutSec }
+        interactiveTimeoutSec
       )
     } catch (err) {
+      // 脱离调试连接的流程只在启动/导航阶段可能抛异常；退回旧的常驻可见浏览器再试一次，
+      // 让「浏览器起不来」和「挑战没过」两类失败仍有各自的可读原因。
       const detail = err?.message || String(err)
-      interactive = {
-        turnstileFailed: true,
-        message: `无法启动或使用可见浏览器：${detail}`,
-        detail: { stage: 'interactive-browser', reason: 'exception', detail }
+      logger.warn(`[relay-checkin-plugin] 脱离调试连接的可见验证未能启动: ${detail}`)
+      logger.warn('[relay-checkin-plugin] 退回附着调试连接的可见浏览器；Turnstile 对 CDP 连接极敏感，'
+        + '这一轮很可能卡在「等待复选框可交互」直到超时')
+      try {
+        interactive = await runTurnstileAttempt(
+          account,
+          { checkinPath, headers, validationHeaders, siteKey },
+          { interactive: true, timeoutSec: interactiveTimeoutSec }
+        )
+      } catch (fallbackErr) {
+        const fallbackDetail = fallbackErr?.message || String(fallbackErr)
+        interactive = {
+          turnstileFailed: true,
+          message: `无法启动或使用可见浏览器：${fallbackDetail}`,
+          detail: { stage: 'interactive-browser', reason: 'exception', detail: fallbackDetail }
+        }
       }
     }
 
@@ -1599,9 +2408,367 @@ export async function turnstileCheckin(account, { checkinPath, headers, validati
 }
 
 /**
+ * Sub2API 专用「干净配方」浏览器路径。
+ *
+ * 实测（某 Sub2API 站点）：走上面的 withPage 通道必定拿不到 Turnstile token
+ * ——STEALTH_SCRIPT 与 setUserAgent 反而被 Cloudflare 判为自动化风险（error-callback
+ * 300010），或者组件根本不渲染 iframe 直到超时。不注入任何反检测脚本、不改 UA、
+ * 只等站点自己的 widget 往 input[name=cf-turnstile-response] 里写值，反而稳定出 token。
+ *
+ * 因此这里不复用 withPage / getBrowser，而是单独启一个一次性实例：既保证配方不被
+ * 上面的公共初始化污染，也不会把这套（对其他站点无效的）配方带进 AnyRouter 等已有流程。
+ * 页面并发闸门与熔断器仍然共用，避免绕过全局资源约束。
+ */
+let xvfbProc = null
+let xvfbReleaseTimer = null
+
+const XVFB_SCREEN = '1920x1080x24'
+
+/**
+ * 让 Xvfb 自己挑一个空闲编号（-displayfd 会把选中的号写到给定 fd）。
+ * 比逐个试编号可靠：既避开与其他程序抢号，也不会被上次异常退出留下的
+ * /tmp/.X<n>-lock 卡住（那种 stale lock 会让固定编号永久不可用）。
+ * @returns {Promise<object|null>} 启动成功的子进程（带 display 字段），旧版 Xvfb 无此参数时返回 null
+ */
+function spawnXvfbAutoDisplay() {
+  return new Promise(resolve => {
+    let proc = null
+    try {
+      proc = spawn('Xvfb', ['-displayfd', '1', '-screen', '0', XVFB_SCREEN, '-nolisten', 'tcp'], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        detached: false
+      })
+    } catch {
+      resolve(null)
+      return
+    }
+    let settled = false
+    let out = ''
+    const finish = value => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (!value) {
+        try { proc.kill() } catch { /* 已退出 */ }
+      }
+      resolve(value)
+    }
+    const timer = setTimeout(() => finish(null), 8000)
+    proc.stdout.on('data', chunk => {
+      out += String(chunk)
+      const num = out.trim().match(/^\d+/)?.[0]
+      if (!num || settled) return
+      proc.display = `:${num}`
+      proc.unref()
+      // -displayfd 写号时监听 socket 已建立，但机器负载高时仍见过 Chrome 抢在
+      // socket 可见之前连上去（报 Missing X server 且被旧版 Puppeteer 吞掉），补一层确认
+      waitForXSocket(num).then(() => finish(proc))
+    })
+    proc.once('error', () => finish(null))
+    proc.once('exit', () => finish(null))
+  })
+}
+
+/**
+ * 等 X server 的 unix socket 出现，最多等 timeoutMs；等不到也照常返回，
+ * 让 Chrome 自己去报错，避免把可用的显示环境误判成不可用。
+ */
+async function waitForXSocket(num, timeoutMs = 3000) {
+  const socket = `/tmp/.X11-unix/X${num}`
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (fs.existsSync(socket)) return true
+    await waitMs(100)
+  }
+  return false
+}
+
+/**
+ * 杀掉本插件自己留下的孤儿 Xvfb（父进程已是 1，说明当初拉起它的 Yunzai 进程已经没了）。
+ * pm2 restart / kill -9 时子进程不会跟着退出，每次重启就多攒一个，几十次重启后
+ * 会白占几百 MB 内存并把显示号耗光。只匹配本插件的固定参数，不动别人（含 xvfb-run）的实例。
+ */
+function reapOrphanXvfb() {
+  try {
+    const out = spawnSync('ps', ['-eo', 'pid=,ppid=,args='], { encoding: 'utf8', timeout: 5000 })
+    if (out.status !== 0 || !out.stdout) return
+    for (const line of out.stdout.split('\n')) {
+      const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/)
+      if (!m || m[2] !== '1') continue
+      if (!m[3].startsWith(`Xvfb -displayfd 1 -screen 0 ${XVFB_SCREEN}`)) continue
+      try {
+        process.kill(Number(m[1]), 'SIGTERM')
+        logger.info(`[relay-checkin-plugin] 已回收上次运行残留的虚拟显示进程（pid ${m[1]}）`)
+      } catch { /* 已退出或无权限 */ }
+    }
+  } catch { /* 拿不到进程列表就算了 */ }
+}
+
+/**
+ * 验证结束后延迟回收虚拟显示：连续签到多个站点时会复用同一个 Xvfb，
+ * 所以不立刻关；池里还留着常驻可见浏览器时也要继续等，否则窗口会失去 X server。
+ */
+function scheduleVirtualDisplayRelease(ms = 120000) {
+  if (!xvfbProc) return
+  if (xvfbReleaseTimer) clearTimeout(xvfbReleaseTimer)
+  xvfbReleaseTimer = setTimeout(() => {
+    xvfbReleaseTimer = null
+    if (!xvfbProc) return
+    for (const pool of pools.values()) {
+      if (pool.instance || pool.activeTasks > 0 || pool.launching) {
+        scheduleVirtualDisplayRelease(ms)
+        return
+      }
+    }
+    const proc = xvfbProc
+    xvfbProc = null
+    try { proc.kill() } catch { /* 已退出 */ }
+  }, ms)
+  xvfbReleaseTimer.unref?.()
+}
+
+/**
+ * Turnstile 在纯无头（headless）下会静默卡死，必须有真实显示环境。
+ * Linux 服务器上没有桌面时自动拉一个 Xvfb 虚拟屏（仅本进程使用，退出时回收）。
+ * @returns {string|null} 需要注入子进程的 DISPLAY，null 表示沿用当前环境
+ */
+async function ensureVirtualDisplay() {
+  if (process.platform !== 'linux') return null
+  if (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) return null
+  if (xvfbReleaseTimer) {
+    clearTimeout(xvfbReleaseTimer)
+    xvfbReleaseTimer = null
+  }
+  if (xvfbProc && !xvfbProc.killed && xvfbProc.exitCode === null) return xvfbProc.display
+  reapOrphanXvfb()
+
+  // 不能复用机器上已有的 display：xvfb-run 起的实例带 -auth <Xauthority>，
+  // 本进程没有那份 auth cookie，Chrome 连上去会报 "Missing X server"。因此始终自己起一个。
+  const auto = await spawnXvfbAutoDisplay()
+  if (auto) {
+    xvfbProc = auto
+    logger.info(`[relay-checkin-plugin] 已启动虚拟显示 ${auto.display} 用于人机验证（无桌面服务器）`)
+    return auto.display
+  }
+
+  // 旧版 Xvfb 不认 -displayfd：退回从 :99 往上找没被占用的编号
+  const failures = []
+  for (let num = 99; num <= 108; num++) {
+    const display = `:${num}`
+    if (fs.existsSync(`/tmp/.X${num}-lock`)) continue
+    const proc = spawn('Xvfb', [display, '-screen', '0', XVFB_SCREEN, '-nolisten', 'tcp'], {
+      stdio: 'ignore',
+      detached: false
+    })
+    const started = await new Promise(resolve => {
+      // Xvfb 正常启动不会有任何输出，只能靠「没有立刻退出」判断
+      const timer = setTimeout(() => resolve(true), 1200)
+      proc.once('error', err => {
+        clearTimeout(timer)
+        failures.push(err?.code === 'ENOENT' ? 'Xvfb 未安装' : String(err?.message || err))
+        resolve(false)
+      })
+      proc.once('exit', () => {
+        clearTimeout(timer)
+        failures.push(`${display} 启动失败（可能已被占用）`)
+        resolve(false)
+      })
+    })
+    if (!started) {
+      // ENOENT 说明根本没装 Xvfb，换编号也没有意义
+      if (failures.at(-1) === 'Xvfb 未安装') break
+      continue
+    }
+    proc.display = display
+    proc.unref()
+    xvfbProc = proc
+    logger.info(`[relay-checkin-plugin] 已启动虚拟显示 ${display} 用于人机验证（无桌面服务器）`)
+    return display
+  }
+  throw new Error(`该站点验证需要显示环境，但本机既无图形桌面也无法启动 Xvfb（${failures[0] || '请安装 xvfb 包'}）`)
+}
+
+/**
+ * 过 Turnstile 并在同一页面内完成 Sub2API 登录。
+ * token 由 Cloudflare 绑定当前浏览器上下文与出口网络，必须在同一页里立刻用掉。
+ *
+ * @param {object} account 需含 baseUrl；tokenOnly 为 false 时还需 loginEmail / password
+ * @param {object} opts { siteKey: 仅 tokenOnly 时用于自渲染组件, tokenOnly: 只取 token 不登录 }
+ * @returns {Promise<{ok: true, data?: object, turnstileToken?: string}|{ok: false, msg: string}>}
+ */
+export async function sub2apiLogin(account, { siteKey = '', tokenOnly = false } = {}) {
+  const cfg = getConfig()
+  if (!cfg.browser.enable) {
+    return { ok: false, msg: '该站点登录需要人机验证，但配置中已关闭浏览器方案' }
+  }
+  const safeUrl = await assertSafeRequestUrl(account.baseUrl)
+  const host = safeUrl.hostname
+  // 实测过码耗时 17~100 秒且波动大，沿用可见验证的额度（默认 120 秒）而不是
+  // 无头的 30 秒，否则大部分尝试会在拿到 token 之前被掐断。
+  const timeoutSec = boundedSeconds(cfg.browser.turnstileInteractiveTimeoutSec, 120, 30, 600)
+
+  checkBreaker(host)
+  await acquirePageSlot()
+  let browser = null
+  try {
+    const display = await ensureVirtualDisplay()
+    const puppeteer = await getPuppeteer()
+    const proxy = parseProxy(proxyForHost(host, true))
+    const executablePath = resolveBrowserExecutable(cfg.browser.executablePath)
+    // 保持这份参数最小化：任何额外的伪装/降级开关都可能重新触发风险判定
+    const args = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
+      '--lang=zh-CN',
+      '--no-first-run',
+      '--no-default-browser-check'
+    ]
+    if (proxy?.server) {
+      args.push(`--proxy-server=${proxy.server}`, '--proxy-bypass-list=<-loopback>')
+    }
+    const launchOptions = {
+      // 必须有头：无头模式下该站点的 Turnstile 组件不会签发 token
+      headless: false,
+      args,
+      ignoreDefaultArgs: ['--enable-automation'],
+      timeout: 60000,
+      protocolTimeout: (timeoutSec + 120) * 1000
+    }
+    if (executablePath) launchOptions.executablePath = executablePath
+    if (display) launchOptions.env = { ...process.env, DISPLAY: display }
+
+    browser = await withTimeout(
+      puppeteer.launch(launchOptions),
+      70000,
+      '浏览器启动超时（检查 Chrome 与虚拟显示是否可用）'
+    )
+    const page = await newPageSafe(browser, 30000)
+    if (proxy?.auth) await withTimeout(page.authenticate(proxy.auth), 15000, '设置代理认证超时')
+    await withTimeout(page.setViewport({ width: 1365, height: 900 }), 15000, '设置浏览器窗口超时')
+    // 这里刻意不做：setUserAgent / evaluateOnNewDocument(STEALTH_SCRIPT) / setExtraHTTPHeaders
+
+    logger.info(`[relay-checkin-plugin] Sub2API 人机验证启动: ${host}（最多 ${timeoutSec} 秒）`)
+    await withTimeout(
+      page.goto(`${safeUrl.origin}/login`, { waitUntil: 'domcontentloaded', timeout: 60000 }),
+      70000,
+      '打开登录页超时（网络或代理不通）'
+    )
+
+    const started = Date.now()
+    const turnstileToken = await withTimeout(
+      page.evaluate(async ({ timeoutMs, siteKey }) => {
+        const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
+        const deadline = Date.now() + timeoutMs
+        const fromInput = () => document.querySelector('input[name="cf-turnstile-response"]')?.value || ''
+        // 首选站点自己渲染的组件：它带着站点配置的 action/cData，也最不容易被判风险
+        while (Date.now() < deadline) {
+          const value = fromInput()
+          if (value) return value
+          await wait(500)
+        }
+        // 站点页面没有组件（例如签到弹窗才渲染）时，用传入的 site key 自渲染兜底
+        if (!siteKey || !window.turnstile?.render) return ''
+        const el = document.createElement('div')
+        document.body.appendChild(el)
+        return await new Promise(resolve => {
+          const timer = setTimeout(() => resolve(''), 30000)
+          try {
+            window.turnstile.render(el, {
+              sitekey: siteKey,
+              callback: token => {
+                clearTimeout(timer)
+                resolve(token)
+              },
+              'error-callback': () => {
+                clearTimeout(timer)
+                resolve('')
+              }
+            })
+          } catch {
+            clearTimeout(timer)
+            resolve('')
+          }
+        })
+      }, { timeoutMs: timeoutSec * 1000, siteKey }),
+      (timeoutSec + 40) * 1000,
+      '等待人机验证无响应'
+    )
+
+    const usedSec = ((Date.now() - started) / 1000).toFixed(1)
+    if (!turnstileToken) {
+      noteResult(host, false)
+      logger.warn(`[relay-checkin-plugin] Sub2API 人机验证未通过（已等待 ${usedSec} 秒）`)
+      return { ok: false, msg: `人机验证未通过（等待 ${usedSec} 秒）：该站点验证成功率不稳定，可稍后重试` }
+    }
+    logger.info(`[relay-checkin-plugin] Sub2API 人机验证已签发 token（${usedSec} 秒）`)
+
+    if (tokenOnly) {
+      noteResult(host, true)
+      return { ok: true, turnstileToken }
+    }
+
+    const login = await withTimeout(
+      page.evaluate(async ({ origin, email, password, tk }) => {
+        try {
+          const res = await fetch(`${origin}/api/v1/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ email, password, turnstile_token: tk })
+          })
+          let json = null
+          try { json = await res.json() } catch { /* 非 JSON 响应 */ }
+          return { status: res.status, json }
+        } catch (err) {
+          return { status: 0, json: null, error: String(err) }
+        }
+      }, {
+        origin: safeUrl.origin,
+        email: String(account.loginEmail || '').trim(),
+        password: String(account.password || ''),
+        tk: turnstileToken
+      }),
+      ((cfg.request.timeout || 15) + 20) * 1000,
+      '提交登录无响应'
+    )
+
+    // 站点响应统一包一层 { code, message, data }
+    const body = login.json
+    const data = body?.data
+    if (login.status !== 200 || !data?.access_token) {
+      noteResult(host, false)
+      const msg = body?.message || body?.msg || login.error || `HTTP ${login.status}`
+      if (body?.requires_2fa || data?.requires_2fa) {
+        return { ok: false, msg: '该账号开启了两步验证（2FA），插件无法自动登录' }
+      }
+      return { ok: false, msg: `登录失败：${msg}` }
+    }
+    noteResult(host, true)
+    return { ok: true, data, turnstileToken }
+  } catch (err) {
+    noteResult(host, false)
+    return { ok: false, msg: err?.message || String(err) }
+  } finally {
+    if (browser) await withTimeout(browser.close(), 20000, '关闭浏览器超时').catch(() => {})
+    scheduleVirtualDisplayRelease()
+    releasePageSlot()
+  }
+}
+
+/**
  * 关闭全部浏览器实例（供测试/退出时清理）
  */
 export async function closeBrowser() {
+  if (xvfbReleaseTimer) {
+    clearTimeout(xvfbReleaseTimer)
+    xvfbReleaseTimer = null
+  }
+  if (xvfbProc) {
+    try { xvfbProc.kill() } catch { /* 已退出 */ }
+    xvfbProc = null
+  }
   for (const pool of pools.values()) {
     if (pool.idleTimer) clearTimeout(pool.idleTimer)
     pool.idleTimer = null

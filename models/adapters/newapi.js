@@ -58,12 +58,23 @@ export default {
   compareBalance: true,
 
   buildHeaders(account) {
-    const headers = {
-      Authorization: `Bearer ${account.token}`,
-      'Content-Type': 'application/json'
+    const headers = { 'Content-Type': 'application/json' }
+    if (account.authMode === 'session') {
+      // 网页会话方式（#中转添加cookie）：签到/验证码接口只认 session Cookie
+      headers.Cookie = `session=${account.token}`
+    } else {
+      headers.Authorization = `Bearer ${account.token}`
     }
     // 部分魔改站仍校验 New-Api-User 头，有值就带上
     if (account.siteUserId) headers['New-Api-User'] = String(account.siteUserId)
+    // access token + 网页会话并存的账号（手动配置 cookie 字段）
+    if (account.cookie) headers.Cookie = account.cookie
+    // 会话类魔改站还会校验请求来自本站页面，补齐 Origin/Referer
+    if (account.cookie || account.authMode === 'session') {
+      const base = String(account.baseUrl || '').replace(/\/+$/, '')
+      headers.Origin = base
+      headers.Referer = `${base}/console`
+    }
     return headers
   },
 

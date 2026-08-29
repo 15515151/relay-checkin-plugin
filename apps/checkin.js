@@ -1,6 +1,6 @@
 import { getConfig } from '../models/config.js'
 import { touchEntry, upsertAccount, removeAccount, setAuto, setAccountAuto, accountLabel, persist, setPushGroup, rememberGroup } from '../models/store.js'
-import { probeAccount, normalizeBaseUrl, getAdapter, cookieTypeForHost, preferredBindingForHost } from '../models/adapters/index.js'
+import { probeAccount, probeSessionAccount, probeSub2apiSite, normalizeBaseUrl, getAdapter, cookieTypeForHost, preferredBindingForHost } from '../models/adapters/index.js'
 import { checkinEntry, checkinAccount, finalizeCheckinResult, queryEntry, refreshBalances } from '../models/executor.js'
 import { withUserLock } from '../models/lock.js'
 import { renderResult, renderList, renderHelp } from '../models/render.js'
@@ -72,6 +72,14 @@ function rawText(e) {
   return String(e.raw_message ?? e.msg ?? '').trim()
 }
 
+/**
+ * 邮箱绑定要填的密码措辞：AgentRouter 特指「站内密码」（易与 GitHub/LinuxDO 混淆），
+ * 其他走邮箱绑定的站点（Sub2API）就是普通登录密码。
+ */
+function emailPasswordLabel(site) {
+  return cookieTypeForHost(site?.host) === 'agentrouter' ? 'AgentRouter站内密码' : '登录密码'
+}
+
 function specializedBindingHint(site) {
   const kind = preferredBindingForHost(site?.host)
   if (kind === 'cookie') {
@@ -96,13 +104,15 @@ function progressTip(accounts) {
   const total = accounts.length
   if (total <= 1) return '正在签到，请稍候...'
 
-  // 浏览器方案站点（过 WAF / 人机验证）单个约 30~60 秒，普通 API 站约 1~3 秒
-  const heavy = accounts.filter(acc => acc.type === 'anyrouter').length
+  // 浏览器方案站点（过 WAF / 人机验证）单个约 30~60 秒，普通 API 站约 1~3 秒。
+  // Sub2API 在 access_token 与 refresh_token 都失效时也要开浏览器过 Turnstile 重登，
+  // 且它的可见过码额度就是 120 秒，漏算会把预计耗时报得远低于实际
+  const heavy = accounts.filter(acc => acc.type === 'anyrouter' || acc.type === 'sub2api').length
   const estSec = heavy * 45 + (total - heavy) * 3
   const estText = estSec >= 60 ? `约 ${Math.ceil(estSec / 60)} 分钟` : `约 ${Math.max(5, Math.ceil(estSec / 5) * 5)} 秒`
   let tip = `正在为你的 ${total} 个账号依次签到，预计${estText}，完成后统一出图，请勿重复发送指令`
   if (heavy > 0) {
-    tip += `\n（其中 ${heavy} 个站点需浏览器验证，耗时较长属正常）`
+    tip += `\n（其中 ${heavy} 个站点可能需要浏览器过验证，耗时较长属正常）`
   }
   return tip
 }
@@ -212,6 +222,8 @@ export default class RelayCheckinApp extends plugin {
       rule: [
         { reg: '^#中转(?:站)?(帮助|help)$', fnc: 'help' },
         { reg: '^#中转(?:站)?添加邮箱\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addEmail' },
+        // 与「添加」规则互不冲突（那条要求 添加 后紧跟空格），仍与同族指令排在一起便于维护
+        { reg: '^#中转(?:站)?添加刷新令牌\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addRefresh' },
         { reg: '^#中转(?:站)?添加[cC]ookie\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addCookie' },
         { reg: '^#中转(?:站)?添加\\s+\\S+(?:\\s+\\S+)*$', fnc: 'add' },
         { reg: '^#中转(?:站)?列表$', fnc: 'list' },
@@ -279,7 +291,7 @@ export default class RelayCheckinApp extends plugin {
 
   async help() {
     const img = await renderHelp()
-    await this.replyImage(img, '帮助图渲染失败，指令：#中转添加 地址 / #中转添加邮箱 AgentRouter地址 / #中转列表 / #中转删除 序号 / #中转签到 [序号] / #中转查询 / #中转定时 开|关 [序号]')
+    await this.replyImage(img, '帮助图渲染失败，指令：#中转添加 地址 / #中转添加邮箱 地址（AgentRouter、Sub2API）/ #中转列表 / #中转删除 序号 / #中转签到 [序号] / #中转查询 / #中转定时 开|关 [序号]')
     return true
   }
 
@@ -333,6 +345,31 @@ export default class RelayCheckinApp extends plugin {
    */
   async verifyCookie(site, rawSession, siteUserId) {
     const token = String(rawSession).replace(/^session=/i, '')
+    // NewAPI 魔改站（如 jianzhile.vip）的签到/验证码接口只认网页会话：
+    // session 能直接过 /api/user/self 就按 new-api 会话账号处理，走 /api/user/checkin。
+    try {
+      const probed = await guardHang(probeSessionAccount(site.baseUrl, token, siteUserId), '识别站点类型')
+      if (probed?.ok) {
+        return {
+          ok: true,
+          info: probed.info,
+          account: {
+            name: site.host,
+            baseUrl: site.baseUrl,
+            type: 'newapi',
+            authMode: 'session',
+            token,
+            loginEmail: null,
+            password: null,
+            siteUserId,
+            signPath: null,
+            auto: true
+          }
+        }
+      }
+    } catch {
+      // 非 new-api 站点继续按域名规则处理
+    }
     const type = cookieTypeForHost(site.host)
     const account = {
       name: site.host,
@@ -356,10 +393,117 @@ export default class RelayCheckinApp extends plugin {
   }
 
   /**
+   * 邮箱登录校验。AgentRouter 与 Sub2API 都用「邮箱 + 站内密码」，但换到的凭据
+   * 完全不同（session cookie vs JWT），因此按站点类型分流。
+   */
+  async verifyEmail(site, loginEmail, password) {
+    if (cookieTypeForHost(site.host) !== 'agentrouter') {
+      const probe = await guardHang(probeSub2apiSite(site.baseUrl), '识别站点类型')
+      if (probe.ok) return await this.verifySub2apiEmail(site, loginEmail, password, probe)
+    }
+    return await this.verifyAgentRouterEmail(site, loginEmail, password)
+  }
+
+  /**
+   * Sub2API 邮箱登录校验。登录要过 Turnstile（浏览器），成功后拿到的
+   * refresh_token 才是长期凭据；登录本身不触发签到，所以不返回 initialCheckin，
+   * 由 saveAccount 的常规首签流程去签。
+   */
+  async verifySub2apiEmail(site, loginEmail, password, probe) {
+    const normalizedEmail = String(loginEmail || '').trim()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      return { ok: false, msg: '邮箱格式不正确' }
+    }
+    const account = {
+      name: site.host,
+      baseUrl: site.baseUrl,
+      type: 'sub2api',
+      authMode: 'email',
+      loginEmail: normalizedEmail,
+      password,
+      // token 存 refresh_token；accessToken/tokenExpiresAt 由适配器登录后写入
+      token: '',
+      accessToken: '',
+      tokenExpiresAt: null,
+      siteUserId: null,
+      signPath: null,
+      auto: true
+    }
+    try {
+      const login = await guardHang(getAdapter('sub2api').login(account), `登录 ${probe.siteName || 'Sub2API'} 站点`)
+      if (!login.ok) {
+        // 过码失败是这类站点最常见的失败原因，且与账号密码对不对无关，
+        // 单说「登录失败」会让用户反复怀疑密码。附上重试与站点差异说明。
+        const turnstileFailed = /人机验证|Turnstile|显示环境/i.test(String(login.msg || ''))
+        return {
+          ok: false,
+          msg: turnstileFailed
+            ? `${login.msg}\n（该站点登录需要通过 Cloudflare 人机验证，与账号密码无关。可再发一次指令重试；若多次都失败，说明该站点的验证等级过高，本机环境无法通过）`
+            : login.msg
+        }
+      }
+      if (!account.token) {
+        return { ok: false, msg: '登录成功，但站点未返回 refresh_token，无法维持自动签到' }
+      }
+      const info = await guardHang(getAdapter('sub2api').userInfo(account), '读取账号信息')
+      if (!info?.ok) return { ok: false, msg: info?.msg || '登录后读取账号信息失败' }
+      return { ok: true, account, info }
+    } catch (err) {
+      return { ok: false, msg: err.message }
+    }
+  }
+
+  /**
+   * Sub2API 刷新令牌校验（不开浏览器）。用于登录 Turnstile 等级过高、
+   * 本机无法过码的站点：用户自行在浏览器 localStorage 取 refresh_token，
+   * 插件立刻消耗它换一对新凭据入库，此后靠每日轮换维持。
+   *
+   * refresh_token 是一次性的，因此这里必须成功换出新值才算绑定成功，
+   * 否则用户会以为绑上了、实际下一轮就 401。
+   */
+  async verifySub2apiRefresh(site, refreshToken, probe) {
+    const token = String(refreshToken || '').trim()
+    if (!token) return { ok: false, msg: '刷新令牌不能为空' }
+
+    const account = {
+      name: site.host,
+      baseUrl: site.baseUrl,
+      type: 'sub2api',
+      authMode: 'refresh',
+      // 该站点过不了码，不保存邮箱密码：留着也无法自动重登，反而多存一份敏感信息
+      loginEmail: null,
+      password: null,
+      token,
+      accessToken: '',
+      tokenExpiresAt: null,
+      siteUserId: null,
+      signPath: null,
+      auto: true
+    }
+    try {
+      const renewed = await guardHang(
+        getAdapter('sub2api').renew(account),
+        `验证 ${probe.siteName?.trim() || 'Sub2API'} 刷新令牌`
+      )
+      if (!renewed.ok) {
+        return {
+          ok: false,
+          msg: `${renewed.msg}\n（刷新令牌是一次性的：取出后若网页端又刷新过页面，该值就会失效。请重新取一次，取完不要再操作该站点网页）`
+        }
+      }
+      const info = await guardHang(getAdapter('sub2api').userInfo(account), '读取账号信息')
+      if (!info?.ok) return { ok: false, msg: info?.msg || '刷新成功但读取账号信息失败' }
+      return { ok: true, account, info }
+    } catch (err) {
+      return { ok: false, msg: err.message }
+    }
+  }
+
+  /**
    * AgentRouter 邮箱登录校验。登录本身会触发签到，因此同时返回首次签到结果，
    * 保存账号时直接复用，避免第二次登录覆盖“本次到账”状态。
    */
-  async verifyEmail(site, loginEmail, password) {
+  async verifyAgentRouterEmail(site, loginEmail, password) {
     const normalizedEmail = String(loginEmail || '').trim()
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
       return { ok: false, msg: '邮箱格式不正确' }
@@ -397,11 +541,11 @@ export default class RelayCheckinApp extends plugin {
    * 「中转绑定 凭据」格式私聊发送，否则提示替代方案且不登记会话
    */
   async startBind(kind, site) {
-    const fullCmd = kind === 'cookie'
-      ? `#中转添加cookie ${site.host} session值 用户ID`
-      : (kind === 'email'
-          ? `#中转添加邮箱 ${site.host} 邮箱 AgentRouter站内密码`
-          : `#中转添加 ${site.host} 令牌`)
+    const fullCmd = {
+      cookie: `#中转添加cookie ${site.host} session值 用户ID`,
+      email: `#中转添加邮箱 ${site.host} 邮箱 ${emailPasswordLabel(site)}`,
+      refresh: `#中转添加刷新令牌 ${site.host} 刷新令牌`
+    }[kind] || `#中转添加 ${site.host} 令牌`
     const block = await getPrivateBlock(this.e)
     if (block && !block.passable) {
       if (this.e.isGroup) {
@@ -443,11 +587,13 @@ export default class RelayCheckinApp extends plugin {
     armBindTimeout(pending, timeoutSec)
     pendingBinds.set(key, pending)
 
-    const need = kind === 'cookie'
-      ? 'session值 用户ID（空格分隔）'
-      : (kind === 'email'
-          ? '邮箱 AgentRouter站内密码（空格分隔）'
-          : '访问令牌（Veloera 站点需再加 空格+站点用户ID）')
+    const need = {
+      cookie: 'session值 用户ID（空格分隔）',
+      email: `邮箱 ${emailPasswordLabel(site)}（空格分隔）`,
+      // 站点没有可复制的「令牌」入口，必须告诉用户去哪取，否则根本无从下手
+      refresh: '刷新令牌（在电脑浏览器登录该站点后按 F12，在 Console 执行：'
+        + "localStorage.getItem('refresh_token') ，把 rt_ 开头的整串发来；取完请不要再刷新该站点页面)"
+    }[kind] || '访问令牌（Veloera 站点需再加 空格+站点用户ID）'
     // disablePrivate 开启但「中转绑定」被放行时，凭据必须带该前缀才能通过拦截
     const sendAs = block ? `中转绑定 ${need}` : need
     const mins = Math.max(1, Math.round(timeoutSec / 60))
@@ -482,6 +628,20 @@ export default class RelayCheckinApp extends plugin {
       if (args.length > 1) await this.recallIfGroup()
       await this.reply(specializedHint)
       return true
+    }
+
+    // Sub2API 站点域名任意，只能问一次公开配置接口。它没有 new-api 的令牌体系，
+    // 直接走令牌绑定只会得到「令牌验证失败」这种看不懂的报错，先引导到邮箱绑定。
+    if (site) {
+      const probe = await probeSub2apiSite(site.baseUrl).catch(() => ({ ok: false }))
+      if (probe.ok) {
+        if (args.length > 1) await this.recallIfGroup()
+        await this.reply(
+          `检测到 ${site.host} 是 Sub2API 站点${probe.siteName ? `（${probe.siteName.trim()}）` : ''}，` +
+          `它没有系统访问令牌，请改用：\n#中转添加邮箱 ${site.baseUrl}\n随后私聊发送：邮箱 登录密码`
+        )
+        return true
+      }
     }
 
     if (args.length === 1) {
@@ -566,7 +726,7 @@ export default class RelayCheckinApp extends plugin {
   }
 
   /**
-   * #中转添加邮箱 地址                → 发起 AgentRouter 邮箱绑定
+   * #中转添加邮箱 地址                → 发起邮箱绑定（AgentRouter / Sub2API）
    * #中转添加邮箱 地址 邮箱 站内密码  → 直接添加（建议仅私聊使用）
    */
   async addEmail() {
@@ -578,32 +738,88 @@ export default class RelayCheckinApp extends plugin {
         await this.reply('站点地址格式不正确或被安全策略拒绝，例如：#中转添加邮箱 https://agentrouter.org')
         return true
       }
+      // 非 AgentRouter 域名时探测一次是否为 Sub2API，两者都不是就不该走邮箱绑定
       if (cookieTypeForHost(site.host) !== 'agentrouter') {
-        await this.reply('邮箱登录绑定目前仅用于 AgentRouter（agentrouter.org / *.air-outer.com）')
-        return true
+        const probe = await probeSub2apiSite(site.baseUrl).catch(() => ({ ok: false }))
+        if (!probe.ok) {
+          await this.reply('邮箱登录绑定仅用于 AgentRouter（agentrouter.org / *.air-outer.com）与 Sub2API 站点，其他站点请用 #中转添加 地址')
+          return true
+        }
       }
       await this.startBind('email', site)
       return true
     }
 
     await this.recallIfGroup()
-    if (!site || cookieTypeForHost(site.host) !== 'agentrouter') {
-      await this.reply('请填写 AgentRouter 的 HTTPS 根地址，例如：#中转添加邮箱 https://agentrouter.org 邮箱 站内密码')
+    if (!site) {
+      await this.reply('请填写站点 HTTPS 根地址，例如：#中转添加邮箱 https://agentrouter.org 邮箱 站内密码')
       return true
     }
     if (args.length !== 3) {
-      await this.reply('格式：#中转添加邮箱 地址 邮箱 AgentRouter站内密码（推荐只发地址，再私聊补发凭据）')
+      await this.reply('格式：#中转添加邮箱 地址 邮箱 站内密码（推荐只发地址，再私聊补发凭据）')
       return true
     }
 
-    await this.runLocked('添加 AgentRouter 邮箱账号', async () => {
-      await this.reply('正在重新登录并验证签到，请稍候...')
+    await this.runLocked('添加邮箱账号', async () => {
+      await this.reply('正在登录并验证账号，请稍候...')
       const r = await this.verifyEmail(site, args[1], args[2])
       if (!r.ok) {
         await this.reply(`添加失败：${r.msg}`)
         return
       }
       await this.saveAccount(r.account, r.info, r.initialCheckin)
+    })
+    return true
+  }
+
+  /**
+   * #中转添加刷新令牌 地址        → 发起刷新令牌绑定
+   * #中转添加刷新令牌 地址 令牌   → 直接添加（建议仅私聊使用）
+   *
+   * 用于登录人机验证等级过高、本机无法过码的 Sub2API 站点。
+   * 用户在浏览器控制台执行 localStorage.getItem('refresh_token') 自取。
+   */
+  async addRefresh() {
+    const args = rawText(this.e).replace(/^[#＃]中转(?:站)?添加刷新令牌\s*/, '').split(/\s+/).filter(Boolean)
+    const site = this.parseSite(args[0])
+
+    if (args.length === 1) {
+      if (!site) {
+        await this.reply('站点地址格式不正确或被安全策略拒绝，例如：#中转添加刷新令牌 https://站点域名')
+        return true
+      }
+      const probe = await probeSub2apiSite(site.baseUrl).catch(() => ({ ok: false }))
+      if (!probe.ok) {
+        await this.reply('刷新令牌绑定仅用于 Sub2API 站点；其他站点请用 #中转添加 地址 或 #中转添加邮箱 地址')
+        return true
+      }
+      await this.startBind('refresh', site)
+      return true
+    }
+
+    await this.recallIfGroup()
+    if (!site) {
+      await this.reply('请填写站点 HTTPS 根地址，例如：#中转添加刷新令牌 https://站点域名 rt_xxx')
+      return true
+    }
+    if (args.length !== 2) {
+      await this.reply('格式：#中转添加刷新令牌 地址 刷新令牌（推荐只发地址，再私聊补发令牌）')
+      return true
+    }
+
+    await this.runLocked('添加刷新令牌账号', async () => {
+      const probe = await probeSub2apiSite(site.baseUrl).catch(() => ({ ok: false }))
+      if (!probe.ok) {
+        await this.reply('该站点不是 Sub2API，无法用刷新令牌绑定')
+        return
+      }
+      await this.reply('正在验证刷新令牌，请稍候...')
+      const r = await this.verifySub2apiRefresh(site, args[1], probe)
+      if (!r.ok) {
+        await this.reply(`添加失败：${r.msg}`)
+        return
+      }
+      await this.saveAccount(r.account, r.info)
     })
     return true
   }
@@ -632,7 +848,7 @@ export default class RelayCheckinApp extends plugin {
     const pending = pendingBinds.get(key)
     if (!pending) {
       if (prefixed) {
-        await this.reply('当前没有等待绑定的站点，请先发送：#中转添加 地址、#中转添加cookie 地址 或 #中转添加邮箱 地址')
+        await this.reply('当前没有等待绑定的站点，请先发送：#中转添加 地址、#中转添加cookie 地址、#中转添加邮箱 地址 或 #中转添加刷新令牌 地址')
         return true
       }
       return false
@@ -655,12 +871,19 @@ export default class RelayCheckinApp extends plugin {
       return true
     }
     if (pending.kind === 'email' && parts.length !== 2) {
-      const fmt = prefixed ? '中转绑定 邮箱 AgentRouter站内密码' : '邮箱 AgentRouter站内密码'
-      await this.reply(`请一次性发送：${fmt}（空格分隔；不是 GitHub/LinuxDO 密码）`)
+      const label = emailPasswordLabel(pending)
+      const fmt = prefixed ? `中转绑定 邮箱 ${label}` : `邮箱 ${label}`
+      const extra = label === 'AgentRouter站内密码' ? '；不是 GitHub/LinuxDO 密码' : ''
+      await this.reply(`请一次性发送：${fmt}（空格分隔${extra}）`)
       return true
     }
     if (pending.kind === 'token' && parts.length > 2) {
       await this.reply('参数过多，请发送：令牌 [站点用户ID]')
+      return true
+    }
+    if (pending.kind === 'refresh' && parts.length !== 1) {
+      const fmt = prefixed ? '中转绑定 刷新令牌' : '刷新令牌'
+      await this.reply(`请只发送一个值：${fmt}（形如 rt_ 开头的长字符串，中间不能有空格）`)
       return true
     }
 
@@ -675,11 +898,19 @@ export default class RelayCheckinApp extends plugin {
         // 进入验证即消费会话，避免验证期间超时重复回执
         clearPending(key)
         await this.reply('正在验证账号，请稍候...')
-        const r = pending.kind === 'cookie'
-          ? await this.verifyCookie(site, parts[0], parts[1])
-          : (pending.kind === 'email'
-              ? await this.verifyEmail(site, parts[0], parts[1])
-              : await this.verifyToken(site, parts[0], parts[1] || null))
+        let r
+        if (pending.kind === 'cookie') {
+          r = await this.verifyCookie(site, parts[0], parts[1])
+        } else if (pending.kind === 'email') {
+          r = await this.verifyEmail(site, parts[0], parts[1])
+        } else if (pending.kind === 'refresh') {
+          const probe = await probeSub2apiSite(site.baseUrl).catch(() => ({ ok: false }))
+          r = probe.ok
+            ? await this.verifySub2apiRefresh(site, parts[0], probe)
+            : { ok: false, msg: '该站点不是 Sub2API，无法用刷新令牌绑定' }
+        } else {
+          r = await this.verifyToken(site, parts[0], parts[1] || null)
+        }
 
         if (!r.ok) {
           await recallBindPrompt(pending)
@@ -725,6 +956,12 @@ export default class RelayCheckinApp extends plugin {
   async saveAccount(account, info, initialCheckin = null) {
     account.username = info.username || ''
     account.lastBalance = info.balanceText || '-'
+    // 回填验证阶段查到的站点用户ID：upsertAccount 先比 siteUserId、都缺时才比令牌，
+    // 而 Sub2API 的 refresh_token 每次绑定都会轮换，缺 ID 就会把重新绑定的同一个账号
+    // 当成新账号追加，列表里出现重复条目
+    if (account.siteUserId == null && info.siteUserId != null) {
+      account.siteUserId = info.siteUserId
+    }
     const { entry, updated, account: stored } = upsertAccount(this.e, account)
     const statusText = updated ? '已更新凭据' : '添加成功'
 

@@ -571,6 +571,27 @@ try {
   assert.equal(store.removeAccount(eGroup, 4).name, 'b.com')
   assert.equal(store.getEntry(eGroup).accounts.length, 3)
 
+  // Sub2API 重新绑定：refresh_token 是一次性的、每次绑定都会轮换，只有 saveAccount 把
+  // 验证阶段查到的站点用户ID 回填进账号，才能认出是同一个账号；缺 ID 又换了令牌就会重复入库
+  const s2acc = (over = {}) => ({
+    name: 's2.test', baseUrl: 'https://s2.test', type: 'sub2api', authMode: 'refresh',
+    token: 'RT_A', siteUserId: 5, signPath: null, auto: true, ...over
+  })
+  const s2First = store.upsertAccount(eGroup, s2acc())
+  assert.equal(s2First.updated, false)
+  const s2Rebind = store.upsertAccount(eGroup, s2acc({ token: 'RT_B' }))
+  assert.deepEqual(
+    [s2Rebind.index, s2Rebind.updated], [s2First.index, true],
+    '令牌轮换后重新绑定同一账号应更新而不是重复添加'
+  )
+  assert.equal(
+    store.upsertAccount(eGroup, s2acc({ token: 'RT_C', siteUserId: null })).updated, false,
+    '缺站点用户ID 时无法去重，因此 saveAccount 必须回填 info.siteUserId'
+  )
+  store.removeAccount(eGroup, store.getEntry(eGroup).accounts.length)
+  store.removeAccount(eGroup, s2First.index)
+  assert.equal(store.getEntry(eGroup).accounts.length, 3, 'Sub2API 用例应清理干净不影响后续断言')
+
   // 定时总开关 + allEntries
   store.setAuto(eGroup, false)
   assert.equal(store.getEntry(eGroup).autoCheckin, false)
