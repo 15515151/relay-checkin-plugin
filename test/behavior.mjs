@@ -185,7 +185,7 @@ try {
   const res = await checkinAccount(AR)
   assert.equal(res.status, 'unknown')
   assert.equal(res.statusText, 'Session 有效·未重登')
-  assert.match(res.msg, /无法确认/)
+  assert.match(res.msg, /说不准|#中转添加邮箱/, '只有 Cookie 时要说清签到没法确认、并指路邮箱绑定')
   assert.equal(res.balance, '$10.00')
   assert.equal(selfCalls, 1, 'Session 验证后不应重复查询用户信息')
   assert.equal(AR.lastBalance, '$10.00', '签到后应缓存余额供列表展示')
@@ -238,7 +238,7 @@ try {
   const integrityFailed = await checkinAccount({ name: 'newapi.test', baseUrl: 'https://newapi.test', type: 'newapi', token: 't' })
   assert.equal(integrityFailed.status, 'fail')
   assert.match(integrityFailed.msg, /完整性标记/)
-  assert.doesNotMatch(integrityFailed.msg, /site key/i)
+  assert.doesNotMatch(integrityFailed.msg, /找不到验证组件/i)
   assert.equal(integrityFailed.balance, '$1.00', '签到失败也应查询余额')
 
 
@@ -313,7 +313,7 @@ try {
   const deadS2 = { ...S2(), token: '', authMode: 'email', loginEmail: 'a@b.com', password: 'p' }
   const noBrowser = await sub2api.userInfo(deadS2, { allowBrowser: false })
   assert.equal(noBrowser.ok, false)
-  assert.match(noBrowser.msg, /不启动浏览器/, '禁用浏览器时应明确返回原因而不是去过码')
+  assert.match(noBrowser.msg, /#中转签到/, '禁用浏览器时应指路重新签到，而不是自己去过码')
   const entryS2 = { accounts: [deadS2] }
   await refreshBalances(entryS2)
   assert.equal(entryS2.accounts[0].lastBalance, '$1.00', '刷新失败应保留旧余额缓存')
@@ -415,7 +415,7 @@ try {
   }
   const ts = await checkinAccount({ name: 't.com', baseUrl: 'https://t.com', type: 'newapi', token: 'T', siteUserId: 1 })
   assert.equal(ts.status, 'fail')
-  assert.match(ts.msg, /site key/, '应触发降级并提示缺少 site key')
+  assert.match(ts.msg, /找不到验证组件/, '应触发降级并说明站点没给出验证组件')
   assert.equal(ts.balance, '$1.00', '降级失败不影响余额查询')
 
   // ---- 7.1 NewAPI：本轮前已签到时跳过 POST，并展示站点记录的今日奖励 ----
@@ -519,7 +519,7 @@ try {
   routes = { 'GET https://anyrouter.top/api/user/self': { status: 200, body: null } }
   const arBlocked = await anyrouter.userInfo(AR2)
   assert.equal(arBlocked.ok, false)
-  assert.match(arBlocked.msg, /浏览器方案未启用/)
+  assert.match(arBlocked.msg, /浏览器方案/, '浏览器方案关掉时要说明白，别静默失败')
   cfgNow.browser.enable = savedEnable
   console.log('适配器行为 OK')
 

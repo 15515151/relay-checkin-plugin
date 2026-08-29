@@ -15,7 +15,7 @@ import { logger, pickBot, segment, defaultSelfId } from '../host/index.js'
  * promptMsgId 为群内「请私聊发送凭据」提示消息，绑定终态时立即撤回，否则到时撤回
  */
 const pendingBinds = new Map()
-const BIND_SCOPE_NOTICE = '授权说明：凭据将在机器人本地保存，仅用于账号验证、余额查询和自动签到；不会修改资料、消耗额度或执行其他账号操作。请仅绑定可信站点并自行承担站点风险。'
+const BIND_SCOPE_NOTICE = '嘟嘟只用它查余额和签到，存在本机不外传；不放心的站点就别绑哦~'
 
 function clearPending(userId) {
   const pending = pendingBinds.get(String(userId))
@@ -93,17 +93,17 @@ function emailPasswordLabel(site) {
 function specializedBindingHint(site) {
   const kind = preferredBindingForHost(site?.host)
   if (kind === 'cookie') {
-    return `检测到 ${site.host} 是 AnyRouter，请不要使用“#中转添加 令牌”。请改用：\n#中转添加cookie ${site.baseUrl}\n随后私聊发送：session值 用户ID`
+    return `${site.host} 是 AnyRouter 呀，令牌绑不上的~ 换成这个：\n#中转添加cookie ${site.baseUrl}\n然后私聊发嘟嘟：session值 用户ID`
   }
   if (kind === 'email') {
-    return `检测到 ${site.host} 是 AgentRouter，普通令牌不能用于自动签到。请改用：\n#中转添加邮箱 ${site.baseUrl}\n随后私聊发送：邮箱 AgentRouter站内密码`
+    return `${site.host} 是 AgentRouter 呀，令牌签不了到哦~ 换成这个：\n#中转添加邮箱 ${site.baseUrl}\n然后私聊发嘟嘟：邮箱 AgentRouter站内密码`
   }
   return null
 }
 
 function agentRouterCookieHint(site) {
   if (preferredBindingForHost(site?.host) !== 'email') return null
-  return `检测到 ${site.host} 是 AgentRouter，Cookie 只能查询余额，不能自动领取每日 $25。请改用：\n#中转添加邮箱 ${site.baseUrl}\n随后私聊发送：邮箱 AgentRouter站内密码`
+  return `${site.host} 是 AgentRouter 呀，Cookie 只能看余额、领不到每天的 $25~ 换成这个：\n#中转添加邮箱 ${site.baseUrl}\n然后私聊发嘟嘟：邮箱 AgentRouter站内密码`
 }
 
 /**
@@ -112,7 +112,7 @@ function agentRouterCookieHint(site) {
  */
 function progressTip(accounts) {
   const total = accounts.length
-  if (total <= 1) return '正在签到，请稍候...'
+  if (total <= 1) return '嘟嘟去签到啦，等一下哦~'
 
   // 浏览器方案站点（过 WAF / 人机验证）单个约 30~60 秒，普通 API 站约 1~3 秒。
   // Sub2API 在 access_token 与 refresh_token 都失效时也要开浏览器过 Turnstile 重登，
@@ -120,9 +120,9 @@ function progressTip(accounts) {
   const heavy = accounts.filter(acc => acc.type === 'anyrouter' || acc.type === 'sub2api').length
   const estSec = heavy * 45 + (total - heavy) * 3
   const estText = estSec >= 60 ? `约 ${Math.ceil(estSec / 60)} 分钟` : `约 ${Math.max(5, Math.ceil(estSec / 5) * 5)} 秒`
-  let tip = `正在为你的 ${total} 个账号依次签到，预计${estText}，完成后统一出图，请勿重复发送指令`
+  let tip = `嘟嘟在给你的 ${total} 个账号挨个签到，${estText}就好，别重复发指令呀~`
   if (heavy > 0) {
-    tip += `\n（其中 ${heavy} 个站点可能需要浏览器过验证，耗时较长属正常）`
+    tip += `\n（有 ${heavy} 个站要过人机验证，会慢一点点哦）`
   }
   return tip
 }
@@ -149,7 +149,7 @@ function guardHang(promise, label, ms = hangBudgetMs()) {
     new Promise((_, reject) => {
       timer = setTimeout(() => {
         logger.error(`[relay-checkin-plugin] ${label} 超时（${ms / 1000}s），已停止等待结果`)
-        reject(new Error(`${label}超时，请检查网络/代理后重试`))
+        reject(new Error(`${label}等太久啦，检查下网络再试呀~`))
       }, ms)
     })
   ])
@@ -299,11 +299,11 @@ export class RelayCheckinCore {
     } catch (err) {
       // 未预见的异常（如落盘失败）也要给用户回执，否则表现为「发了指令没反应」
       logger.error(`[relay-checkin-plugin] ${label} 执行异常:`, err)
-      await this.reply(`${label}出错了：${err?.message || err}`)
+      await this.reply(`${label}出岔子啦，嘟嘟记在日志里了，等下再试呀~`)
       return false
     }
     if (!r.ok) {
-      await this.reply(`你的「${r.busy.label}」正在进行中（已 ${r.busy.seconds} 秒），请等它完成后再试`, true)
+      await this.reply(`你的「${r.busy.label}」还在跑呢~ 等它完事再来呀`, true)
       return false
     }
     return true
@@ -322,7 +322,7 @@ export class RelayCheckinCore {
 
   async help() {
     const img = await renderHelp()
-    await this.replyImage(img, '帮助图渲染失败，指令：#中转添加 地址 / #中转添加邮箱 地址（AgentRouter、Sub2API）/ #中转列表 / #中转删除 序号 / #中转签到 [序号] / #中转查询 / #中转定时 开|关 [序号]')
+    await this.replyImage(img, '帮助图没画出来呀…指令有这些：#中转添加 地址 / #中转添加邮箱 地址（AgentRouter、Sub2API）/ #中转列表 / #中转删除 序号 / #中转签到 [序号] / #中转查询 / #中转定时 开|关 [序号]')
     return true
   }
 
@@ -582,16 +582,16 @@ export class RelayCheckinCore {
       if (this.e.isGroup) {
         const recallTip = getConfig().recallAdd ? '（机器人会尝试撤回）' : '（注意令牌会暴露在群里，建议发后自行撤回）'
         await this.reply(
-          '机器人已开启私聊禁用（disablePrivate），私聊补发凭据会被拦截，本次未发起绑定。可任选：\n' +
-          '1) 请主人在 config/config/other.yaml 的 disableAdopt 中加入 中转 ，之后重新发起，私聊发送：中转绑定 凭据\n' +
-          `2) 直接在本群发送完整指令${recallTip}：${fullCmd}`,
+          '嘟嘟收不到私聊呀（机器人开了私聊禁用），这次没能开始绑定。两个办法：\n' +
+          '1) 请主人在 config/config/other.yaml 的 disableAdopt 里加上 中转 ，然后重发指令，私聊发：中转绑定 凭据\n' +
+          `2) 直接在群里发完整指令${recallTip}：${fullCmd}`,
           true, { recallMsg: bindRecallSec() }
         )
       } else {
         // 本条私聊指令能到达说明完整指令格式可被放行，单发的裸凭据则会被拦截
         await this.reply(
-          '机器人已开启私聊禁用（disablePrivate），后续单发的凭据会被拦截，本次未发起绑定。' +
-          `请直接发送完整指令：${fullCmd}，或请主人在 disableAdopt 中加入 中转 后改发：中转绑定 凭据`
+          '嘟嘟收不到你单独发来的凭据呀（机器人开了私聊禁用），这次没能开始绑定。' +
+          `直接发完整指令就行：${fullCmd}\n或者请主人在 disableAdopt 里加上 中转`
         )
       }
       return
@@ -622,16 +622,16 @@ export class RelayCheckinCore {
       cookie: 'session值 用户ID（空格分隔）',
       email: `邮箱 ${emailPasswordLabel(site)}（空格分隔）`,
       // 站点没有可复制的「令牌」入口，必须告诉用户去哪取，否则根本无从下手
-      refresh: '刷新令牌（在电脑浏览器登录该站点后按 F12，在 Console 执行：'
-        + "localStorage.getItem('refresh_token') ，把 rt_ 开头的整串发来；取完请不要再刷新该站点页面)"
-    }[kind] || '访问令牌（Veloera 站点需再加 空格+站点用户ID）'
+      refresh: '刷新令牌（电脑浏览器登录该站点 → F12 → Console 里执行 '
+        + "localStorage.getItem('refresh_token') ，把 rt_ 开头的整串发来；取完别再刷新那个页面哦)"
+    }[kind] || '访问令牌（Veloera 站点还要再加 空格+站点用户ID）'
     // disablePrivate 开启但「中转绑定」被放行时，凭据必须带该前缀才能通过拦截
     const sendAs = block ? `中转绑定 ${need}` : need
     const mins = Math.max(1, Math.round(timeoutSec / 60))
     if (this.e.isGroup) {
       // 提示消息由插件自己管理撤回：绑定出结果立即撤，否则到 groupRecallSec 兜底撤
       const res = await this.reply(
-        `已记录站点 ${pending.host}，请在 ${mins} 分钟内私聊我直接发送：${sendAs}。敏感信息不要发在群里，结果会回到本群提示。\n${BIND_SCOPE_NOTICE}`,
+        `记下 ${pending.host} 啦~ ${mins} 分钟内私聊嘟嘟发：${sendAs}\n别发群里哦，结果嘟嘟会回到这个群~\n${BIND_SCOPE_NOTICE}`,
         true
       )
       pending.promptMsgId = res?.message_id ?? null
@@ -640,7 +640,7 @@ export class RelayCheckinCore {
         pending.promptTimer = setTimeout(() => recallBindPrompt(pending), sec * 1000)
       }
     } else {
-      await this.reply(`已记录站点 ${pending.host}，请在 ${mins} 分钟内直接发送：${sendAs}\n${BIND_SCOPE_NOTICE}`)
+      await this.reply(`记下 ${pending.host} 啦~ ${mins} 分钟内发给嘟嘟：${sendAs}\n${BIND_SCOPE_NOTICE}`)
     }
   }
 
@@ -668,8 +668,8 @@ export class RelayCheckinCore {
       if (probe.ok) {
         if (args.length > 1) await this.recallIfGroup()
         await this.reply(
-          `检测到 ${site.host} 是 Sub2API 站点${probe.siteName ? `（${probe.siteName.trim()}）` : ''}，` +
-          `它没有系统访问令牌，请改用：\n#中转添加邮箱 ${site.baseUrl}\n随后私聊发送：邮箱 登录密码`
+          `${site.host} 是 Sub2API 站点呀${probe.siteName ? `（${probe.siteName.trim()}）` : ''}，` +
+          `没有访问令牌这东西~ 换成这个：\n#中转添加邮箱 ${site.baseUrl}\n然后私聊发嘟嘟：邮箱 登录密码`
         )
         return true
       }
@@ -677,7 +677,7 @@ export class RelayCheckinCore {
 
     if (args.length === 1) {
       if (!site) {
-        await this.reply('站点地址格式不正确或被安全策略拒绝，请填写 HTTPS 站点根地址，例如：#中转添加 https://xx.com')
+        await this.reply('*(歪头)* 这个地址嘟嘟看不懂呀，要 https 开头的哦~\n例：#中转添加 https://xx.com')
         return true
       }
       await this.startBind('token', site)
@@ -686,20 +686,20 @@ export class RelayCheckinCore {
 
     await this.recallIfGroup()
     if (!site) {
-      await this.reply('站点地址格式不正确或被安全策略拒绝，请填写 HTTPS 站点根地址，例如：#中转添加 https://xx.com 令牌')
+      await this.reply('*(歪头)* 这个地址嘟嘟看不懂呀，要 https 开头的哦~\n例：#中转添加 https://xx.com 令牌')
       return true
     }
     if (args.length > 3) {
-      await this.reply('参数过多：#中转添加 地址 令牌 [站点用户ID]（令牌中不能含空格）')
+      await this.reply('参数多啦~ 是这样发：#中转添加 地址 令牌 [站点用户ID]（令牌里不能有空格）')
       return true
     }
 
     // 加锁：入库会改动 accounts 数组，不能与正在进行的签到/删除交错
     await this.runLocked('添加账号', async () => {
-      await this.reply('正在验证账号，请稍候...')
+      await this.reply('嘟嘟去验一下，等等哦~')
       const r = await this.verifyToken(site, args[1], args[2] || null)
       if (!r.ok) {
-        await this.reply(`添加失败：${r.msg}`)
+        await this.reply(`没绑上呀：${r.msg}`)
         return
       }
       await this.saveAccount(r.account, r.info)
@@ -725,7 +725,7 @@ export class RelayCheckinCore {
 
     if (args.length === 1) {
       if (!site) {
-        await this.reply('站点地址格式不正确或被安全策略拒绝，请填写 HTTPS 站点根地址，例如：#中转添加cookie https://xx.com')
+        await this.reply('*(歪头)* 这个地址嘟嘟看不懂呀，要 https 开头的哦~\n例：#中转添加cookie https://xx.com')
         return true
       }
       await this.startBind('cookie', site)
@@ -734,21 +734,21 @@ export class RelayCheckinCore {
 
     await this.recallIfGroup()
     if (!site) {
-      await this.reply('站点地址格式不正确或被安全策略拒绝，请填写 HTTPS 站点根地址，例如：#中转添加cookie https://xx.com session值 用户ID')
+      await this.reply('*(歪头)* 这个地址嘟嘟看不懂呀，要 https 开头的哦~\n例：#中转添加cookie https://xx.com session值 用户ID')
       return true
     }
     if (args.length !== 3) {
       await this.reply(args.length === 2
-        ? '缺少站点用户ID，格式：#中转添加cookie 地址 session值 用户ID（或只发地址走私聊绑定）'
-        : '参数过多：#中转添加cookie 地址 session值 用户ID（session 中不能含空格）')
+        ? '还差站点用户ID呀~ 这样发：#中转添加cookie 地址 session值 用户ID（或者只发地址，私聊补也行）'
+        : '参数多啦~ 是这样发：#中转添加cookie 地址 session值 用户ID（session 里不能有空格）')
       return true
     }
 
     await this.runLocked('添加账号', async () => {
-      await this.reply('正在验证账号，请稍候...')
+      await this.reply('嘟嘟去验一下，等等哦~')
       const r = await this.verifyCookie(site, args[1], args[2])
       if (!r.ok) {
-        await this.reply(`添加失败：${r.msg}`)
+        await this.reply(`没绑上呀：${r.msg}`)
         return
       }
       await this.saveAccount(r.account, r.info)
@@ -766,14 +766,14 @@ export class RelayCheckinCore {
 
     if (args.length === 1) {
       if (!site) {
-        await this.reply('站点地址格式不正确或被安全策略拒绝，例如：#中转添加邮箱 https://agentrouter.org')
+        await this.reply('*(歪头)* 这个地址嘟嘟看不懂呀~\n例：#中转添加邮箱 https://agentrouter.org')
         return true
       }
       // 非 AgentRouter 域名时探测一次是否为 Sub2API，两者都不是就不该走邮箱绑定
       if (cookieTypeForHost(site.host) !== 'agentrouter') {
         const probe = await probeSub2apiSite(site.baseUrl).catch(() => ({ ok: false }))
         if (!probe.ok) {
-          await this.reply('邮箱登录绑定仅用于 AgentRouter（agentrouter.org / *.air-outer.com）与 Sub2API 站点，其他站点请用 #中转添加 地址')
+          await this.reply('邮箱绑定只有 AgentRouter 和 Sub2API 能用哦~ 别的站点发 #中转添加 地址')
           return true
         }
       }
@@ -783,19 +783,19 @@ export class RelayCheckinCore {
 
     await this.recallIfGroup()
     if (!site) {
-      await this.reply('请填写站点 HTTPS 根地址，例如：#中转添加邮箱 https://agentrouter.org 邮箱 站内密码')
+      await this.reply('地址要 https 开头的哦~\n例：#中转添加邮箱 https://agentrouter.org 邮箱 站内密码')
       return true
     }
     if (args.length !== 3) {
-      await this.reply('格式：#中转添加邮箱 地址 邮箱 站内密码（推荐只发地址，再私聊补发凭据）')
+      await this.reply('是这样发：#中转添加邮箱 地址 邮箱 站内密码（推荐只发地址，再私聊补凭据~）')
       return true
     }
 
     await this.runLocked('添加邮箱账号', async () => {
-      await this.reply('正在登录并验证账号，请稍候...')
+      await this.reply('嘟嘟去登录验一下，等等哦~')
       const r = await this.verifyEmail(site, args[1], args[2])
       if (!r.ok) {
-        await this.reply(`添加失败：${r.msg}`)
+        await this.reply(`没绑上呀：${r.msg}`)
         return
       }
       await this.saveAccount(r.account, r.info, r.initialCheckin)
@@ -816,12 +816,12 @@ export class RelayCheckinCore {
 
     if (args.length === 1) {
       if (!site) {
-        await this.reply('站点地址格式不正确或被安全策略拒绝，例如：#中转添加刷新令牌 https://站点域名')
+        await this.reply('*(歪头)* 这个地址嘟嘟看不懂呀~\n例：#中转添加刷新令牌 https://站点域名')
         return true
       }
       const probe = await probeSub2apiSite(site.baseUrl).catch(() => ({ ok: false }))
       if (!probe.ok) {
-        await this.reply('刷新令牌绑定仅用于 Sub2API 站点；其他站点请用 #中转添加 地址 或 #中转添加邮箱 地址')
+        await this.reply('刷新令牌只有 Sub2API 站点能用哦~ 别的站点发 #中转添加 地址 或 #中转添加邮箱 地址')
         return true
       }
       await this.startBind('refresh', site)
@@ -830,24 +830,24 @@ export class RelayCheckinCore {
 
     await this.recallIfGroup()
     if (!site) {
-      await this.reply('请填写站点 HTTPS 根地址，例如：#中转添加刷新令牌 https://站点域名 rt_xxx')
+      await this.reply('地址要 https 开头的哦~\n例：#中转添加刷新令牌 https://站点域名 rt_xxx')
       return true
     }
     if (args.length !== 2) {
-      await this.reply('格式：#中转添加刷新令牌 地址 刷新令牌（推荐只发地址，再私聊补发令牌）')
+      await this.reply('是这样发：#中转添加刷新令牌 地址 刷新令牌（推荐只发地址，再私聊补令牌~）')
       return true
     }
 
     await this.runLocked('添加刷新令牌账号', async () => {
       const probe = await probeSub2apiSite(site.baseUrl).catch(() => ({ ok: false }))
       if (!probe.ok) {
-        await this.reply('该站点不是 Sub2API，无法用刷新令牌绑定')
+        await this.reply('这站不是 Sub2API 呀，刷新令牌用不了哦~')
         return
       }
-      await this.reply('正在验证刷新令牌，请稍候...')
+      await this.reply('嘟嘟去验一下这个令牌，等等哦~')
       const r = await this.verifySub2apiRefresh(site, args[1], probe)
       if (!r.ok) {
-        await this.reply(`添加失败：${r.msg}`)
+        await this.reply(`没绑上呀：${r.msg}`)
         return
       }
       await this.saveAccount(r.account, r.info)
@@ -869,7 +869,7 @@ export class RelayCheckinCore {
       // 带前缀说明是误发到群的凭据：尽量撤回并提醒；普通群聊消息放行
       if (prefixed) {
         await this.recallIfGroup()
-        await this.reply('凭据请私聊我发送，不要发在群里', false, { recallMsg: bindRecallSec() })
+        await this.reply('*(捂嘴)* 别发群里呀！私聊发给嘟嘟哦~', false, { recallMsg: bindRecallSec() })
         return true
       }
       return false
@@ -879,7 +879,7 @@ export class RelayCheckinCore {
     const pending = pendingBinds.get(key)
     if (!pending) {
       if (prefixed) {
-        await this.reply('当前没有等待绑定的站点，请先发送：#中转添加 地址、#中转添加cookie 地址、#中转添加邮箱 地址 或 #中转添加刷新令牌 地址')
+        await this.reply('嘟嘟没在等哪个站点呀~ 先发 #中转添加 地址（或 #中转添加cookie / #中转添加邮箱 / #中转添加刷新令牌 地址）')
         return true
       }
       return false
@@ -890,7 +890,7 @@ export class RelayCheckinCore {
     const parts = raw.replace(/^[#＃/\\]?\s*中转(?:站)?绑定\s*/, '').split(/\s+/).filter(Boolean)
     if (!parts.length) {
       if (prefixed) {
-        await this.reply('请在 中转绑定 后附上凭据，例如：中转绑定 令牌')
+        await this.reply('凭据要跟在后面呀，像这样：中转绑定 令牌')
         return true
       }
       return false
@@ -898,23 +898,23 @@ export class RelayCheckinCore {
     if (pending.kind === 'cookie' && parts.length !== 2) {
       // 用户走「中转绑定」前缀（disablePrivate 放行）时，重发也必须带前缀才不被拦截
       const fmt = prefixed ? '中转绑定 session值 用户ID' : 'session值 用户ID'
-      await this.reply(`请一次性发送：${fmt}（空格分隔，不能多填参数）`)
+      await this.reply(`一次性发过来哦：${fmt}（用空格隔开，别多填呀~）`)
       return true
     }
     if (pending.kind === 'email' && parts.length !== 2) {
       const label = emailPasswordLabel(pending)
       const fmt = prefixed ? `中转绑定 邮箱 ${label}` : `邮箱 ${label}`
-      const extra = label === 'AgentRouter站内密码' ? '；不是 GitHub/LinuxDO 密码' : ''
-      await this.reply(`请一次性发送：${fmt}（空格分隔${extra}）`)
+      const extra = label === 'AgentRouter站内密码' ? '，不是 GitHub/LinuxDO 的密码哦' : ''
+      await this.reply(`一次性发过来哦：${fmt}（用空格隔开${extra}~）`)
       return true
     }
     if (pending.kind === 'token' && parts.length > 2) {
-      await this.reply('参数过多，请发送：令牌 [站点用户ID]')
+      await this.reply('参数多啦~ 发：令牌 [站点用户ID] 就好')
       return true
     }
     if (pending.kind === 'refresh' && parts.length !== 1) {
       const fmt = prefixed ? '中转绑定 刷新令牌' : '刷新令牌'
-      await this.reply(`请只发送一个值：${fmt}（形如 rt_ 开头的长字符串，中间不能有空格）`)
+      await this.reply(`只发一个值就好哦：${fmt}（rt_ 开头的一长串，中间没有空格~）`)
       return true
     }
 
@@ -928,7 +928,7 @@ export class RelayCheckinCore {
       locked = await withUserLock(this.e.user_id, '绑定账号', async () => {
         // 进入验证即消费会话，避免验证期间超时重复回执
         clearPending(key)
-        await this.reply('正在验证账号，请稍候...')
+        await this.reply('嘟嘟去验一下，等等哦~')
         let r
         if (pending.kind === 'cookie') {
           r = await this.verifyCookie(site, parts[0], parts[1])
@@ -938,15 +938,15 @@ export class RelayCheckinCore {
           const probe = await probeSub2apiSite(site.baseUrl).catch(() => ({ ok: false }))
           r = probe.ok
             ? await this.verifySub2apiRefresh(site, parts[0], probe)
-            : { ok: false, msg: '该站点不是 Sub2API，无法用刷新令牌绑定' }
+            : { ok: false, msg: '这站不是 Sub2API 呀，刷新令牌用不了哦' }
         } else {
           r = await this.verifyToken(site, parts[0], parts[1] || null)
         }
 
         if (!r.ok) {
           await recallBindPrompt(pending)
-          await this.reply(`绑定失败：${r.msg}\n可重新发送添加指令再试`)
-          await notifyBindGroup(pending, `中转站 ${pending.host} 绑定失败：${r.msg}`)
+          await this.reply(`没绑上呀：${r.msg}\n重新发一次添加指令试试~`)
+          await notifyBindGroup(pending, `中转站 ${pending.host} 没绑上：${r.msg}`)
           return
         }
 
@@ -962,7 +962,7 @@ export class RelayCheckinCore {
     } catch (err) {
       // 未预见的异常也要回执，否则表现为「发了凭据没反应」
       logger.error('[relay-checkin-plugin] 绑定账号执行异常:', err)
-      await this.reply(`绑定出错了：${err?.message || err}\n可重新发送添加指令再试`)
+      await this.reply('绑定出岔子啦，重新发一次添加指令试试~')
       return true
     }
     if (!locked.ok) {
@@ -972,8 +972,8 @@ export class RelayCheckinCore {
       armBindTimeout(pending, timeoutSec)
       const mins = Math.max(1, Math.round(timeoutSec / 60))
       await this.reply(
-        `你的「${locked.busy.label}」正在进行中（已 ${locked.busy.seconds} 秒），本次凭据未保存。` +
-        `等它完成后在 ${mins} 分钟内再发一次凭据即可，站点已记住（无需重发添加指令）`
+        `你的「${locked.busy.label}」还在跑呢~ 这次的凭据嘟嘟没存。` +
+        `等它完事后 ${mins} 分钟内再发一次凭据就行，站点嘟嘟还记着哒`
       )
     }
     return true
@@ -1037,14 +1037,14 @@ export class RelayCheckinCore {
   async list() {
     const entry = touchEntry(this.e)
     if (!entry || !entry.accounts.length) {
-      await this.reply('你还没有添加账号，发送 #中转帮助 查看用法')
+      await this.reply('你还没绑账号呢~ 发 #中转帮助 看看吧')
       return true
     }
     await this.runLocked('列表', async () => {
       // 实时刷新余额（AnyRouter 等浏览器站耗时长，用缓存）；签到状态来自本插件签到记录
       await refreshBalances(entry)
       const img = await renderList(entry)
-      await this.replyImage(img, '列表渲染失败，请查看日志')
+      await this.replyImage(img, '列表图没画出来呀…等下再试试哦')
     })
     return true
   }
@@ -1057,9 +1057,9 @@ export class RelayCheckinCore {
     await this.runLocked('删除账号', async () => {
       const removed = removeAccount(this.e, index)
       if (!removed) {
-        await this.reply(`删除失败：序号 ${index} 不存在，发送 #中转列表 查看`)
+        await this.reply(`没有 [${index}] 号账号呀，发 #中转列表 看看~`)
       } else {
-        await this.reply(`已删除账号 [${index}] ${accountLabel(removed)}`)
+        await this.reply(`[${index}] ${accountLabel(removed)} 删掉啦~`)
       }
     })
     return true
@@ -1068,21 +1068,21 @@ export class RelayCheckinCore {
   async checkin() {
     const entry = touchEntry(this.e)
     if (!entry || !entry.accounts.length) {
-      await this.reply('你还没有添加账号，发送 #中转帮助 查看用法')
+      await this.reply('你还没绑账号呢~ 发 #中转帮助 看看吧')
       return true
     }
 
     const indexMatch = /^#中转(?:站)?签到\s*(\d+)$/.exec(this.e.msg)
     const index = indexMatch ? Number(indexMatch[1]) : null
     if (index !== null && (index < 1 || index > entry.accounts.length)) {
-      await this.reply(`序号 ${index} 不存在，发送 #中转列表 查看`)
+      await this.reply(`没有 [${index}] 号账号呀，发 #中转列表 看看~`)
       return true
     }
 
     await this.runLocked('签到', async () => {
       const targets = index ? [entry.accounts[index - 1]] : entry.accounts
       await this.reply(index
-        ? `正在签到 [${index}] ${accountLabel(targets[0])}，请稍候...`
+        ? `嘟嘟去签 [${index}] ${accountLabel(targets[0])} 啦，等一下哦~`
         : progressTip(targets))
       const results = await checkinEntry(entry, { index })
       const img = await renderResult({
@@ -1097,12 +1097,12 @@ export class RelayCheckinCore {
   async query() {
     const entry = touchEntry(this.e)
     if (!entry || !entry.accounts.length) {
-      await this.reply('你还没有添加账号，发送 #中转帮助 查看用法')
+      await this.reply('你还没绑账号呢~ 发 #中转帮助 看看吧')
       return true
     }
 
     await this.runLocked('余额查询', async () => {
-      await this.reply('正在查询，请稍候...')
+      await this.reply('嘟嘟去看看余额，等等哦~')
       const results = await queryEntry(entry)
       const img = await renderResult({
         title: '中转站余额查询',
@@ -1128,16 +1128,16 @@ export class RelayCheckinCore {
       await this.runLocked('定时开关', async () => {
         const acc = setAccountAuto(this.e, index, enable)
         if (!acc) {
-          await this.reply(`序号 ${index} 不存在，发送 #中转列表 查看`)
+          await this.reply(`没有 [${index}] 号账号呀，发 #中转列表 看看~`)
         } else {
-          await this.reply(`已${enable ? '开启' : '关闭'} [${index}] ${accountLabel(acc)} 的定时签到`)
+          await this.reply(`[${index}] ${accountLabel(acc)} 的定时签到${enable ? '开好啦~' : '关掉啦~'}`)
         }
       })
       return true
     }
 
     setAuto(this.e, enable)
-    await this.reply(`定时签到总开关已${enable ? '开启' : '关闭'}（可用 #中转定时 开/关 序号 单独控制某个账号）`)
+    await this.reply(`定时签到${enable ? '开好啦~' : '关掉啦~'} 想单独管某个账号就发 #中转定时 开 序号`)
     return true
   }
 
@@ -1147,14 +1147,14 @@ export class RelayCheckinCore {
    */
   async togglePushGroup() {
     if (!this.e.isGroup) {
-      await this.reply('请在需要开启/关闭推送的群里发送该指令')
+      await this.reply('要在群里发这条指令哦~')
       return true
     }
     const role = this.e.sender?.role
     const isAdmin = this.e.isMaster || this.e.member?.is_owner || this.e.member?.is_admin ||
       role === 'owner' || role === 'admin'
     if (!isAdmin) {
-      await this.reply('仅群主/管理员或机器人主人可操作本群的定时推送开关')
+      await this.reply('*(摇头)* 这个只有群管和主人能改呀~')
       return true
     }
 
@@ -1162,10 +1162,10 @@ export class RelayCheckinCore {
     const changed = setPushGroup(this.e.group_id, enable)
     if (enable) {
       await this.reply(changed
-        ? '已开启本群的定时签到结果推送（将推送全部用户的定时签到结果）'
-        : '本群已处于开启状态')
+        ? '好哒~ 以后定时签到的结果都发到这个群里'
+        : '这个群本来就开着哦~')
     } else {
-      await this.reply(changed ? '已关闭本群的定时签到结果推送' : '本群本来就未开启推送')
+      await this.reply(changed ? '好哒~ 这个群不再收签到结果啦' : '这个群本来就没开呀~')
     }
     return true
   }

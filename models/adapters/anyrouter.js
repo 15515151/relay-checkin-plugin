@@ -61,7 +61,7 @@ export default {
       if (cached) return { ok: true, cookieHeader: cached }
     }
     if (!getConfig().browser.enable) {
-      return { ok: false, msg: '浏览器方案未启用（browser.enable），无法过 WAF' }
+      return { ok: false, msg: '这站要用浏览器才过得去，可主人把浏览器方案关了呀~' }
     }
     const res = await fetchWafCookies(account)
     if (res.wafBlocked || !res.cookieHeader) return { ok: false, msg: WAF_MSG }

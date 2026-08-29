@@ -1,5 +1,6 @@
 import { getConfig } from '../config.js'
 import { assertSafeRequestUrl } from '../url-security.js'
+import { logger } from '../../host/index.js'
 
 /**
  * 按代理配置判断某 host 是否走代理，返回代理地址或 null（纯函数便于测试）
@@ -169,6 +170,8 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
       clearTimeout(timer)
     }
   }
+  // 用户只会看到「连不上」这类人话，真实原因（超时/DNS/证书）只有这里留得住
+  logger.warn(`[relay-checkin-plugin] ${normalizedMethod} ${targetUrl} 请求失败: ${lastErr?.message || lastErr}`)
   throw new Error(`${normalizedMethod} 请求失败: ${lastErr?.message || lastErr}`)
 }
 
@@ -236,33 +239,33 @@ export function classifyValidation(json, meta = {}) {
  */
 export function parseCheckinResult(status, json, meta = {}) {
   if ([520, 521, 522, 523, 524, 525, 526].includes(Number(status))) {
-    return { ok: false, already: false, msg: `站点源服务器无响应 (HTTP ${status})` }
+    return { ok: false, already: false, msg: '站点没反应呀，晚点再试试~' }
   }
   if (status === 404) {
-    return { ok: false, already: false, msg: '站点无此签到接口（可能未启用签到功能）' }
+    return { ok: false, already: false, msg: '这站没有签到功能呀' }
   }
   if (status === 301 || status === 302) {
-    return { ok: false, already: false, msg: '被重定向到登录页，凭据可能已失效' }
+    return { ok: false, already: false, msg: '站点让嘟嘟去登录呀，凭据大概过期了，重新绑一下吧' }
   }
   const msg = json?.message || json?.msg || json?.error?.message || ''
   const validation = classifyValidation(json, meta)
   if (validation) {
     const validationMessage = {
-      turnstile: '站点开启了 Turnstile 人机验证，无法直接签到',
-      pow: '站点要求完成安全验证（POW），无法直接签到',
-      captcha: '站点要求完成验证码/人机验证，无法直接签到',
-      waf: '请求被站点 WAF/人机验证拦截'
+      turnstile: '这站要过人机验证呀',
+      pow: '这站要做安全验证呀',
+      captcha: '这站要填验证码呀',
+      waf: '被站点的防护拦下来啦'
     }[validation]
     return { ok: false, already: false, validation, msg: validationMessage }
   }
   if (status === 401 || status === 403) {
-    return { ok: false, already: false, msg: `凭据无效或已过期 (HTTP ${status})` }
+    return { ok: false, already: false, msg: '凭据不好用了呀，重新绑一下吧' }
   }
   if (Number(status) === 0 && meta?.error) {
-    return { ok: false, already: false, msg: `请求失败：${String(meta.error)}` }
+    return { ok: false, already: false, msg: '连不上这个站呀，检查下网络哦' }
   }
   if (!json) {
-    return { ok: false, already: false, msg: `响应异常 (HTTP ${status})` }
+    return { ok: false, already: false, msg: '站点回了句嘟嘟看不懂的话呀' }
   }
   const success = json.success === true ||
     (json.success == null && (json.ret === 1 || json.code === 0 || json.code === '0'))
