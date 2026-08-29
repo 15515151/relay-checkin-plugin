@@ -87,10 +87,11 @@ export default definePlugin({
     registerCommands(ctx)
     registerCron(ctx)
 
-    // 凡是 ctx 之外自己开的资源都要登记，否则卸载后 Chromium 与定时器会留着
+    // 凡是 ctx 之外自己开的资源都要登记，否则卸载后过码浏览器与定时器会留着
+    // （出图的浏览器归渲染器插件管，不在这里）
     ctx.onDispose(async () => {
       disposeBinds()
-      await disposeRenderer()
+      disposeRenderer()
       await closeBrowser()
       await disposeConfig()
     })

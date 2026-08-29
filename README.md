@@ -15,7 +15,7 @@ TRSS-Yunzai 中转站自动签到插件（OneBot v11），同时支持 [Yunzai N
 
 相对上游 [Cat-bl/relay-checkin-plugin](https://github.com/Cat-bl/relay-checkin-plugin) 的增量：
 
-- **同时支持 Yunzai NG**：同一份代码在 TRSS-Yunzai 与 [Yunzai NG](https://github.com/Yunzai-NG/yunzai-ng) 上都能跑。做法是把对宿主的依赖（日志、账号、数据目录、配置、出图）收进一层适配器（`host/`），指令逻辑一份不动；NG 侧另有 `configSchema` 面板配置、`ctx.cron` 定时任务（改 cron 立即生效）、插件自带的 art-template + puppeteer 出图。详见 [装在 Yunzai NG 上](#装在-yunzai-ng-上)。
+- **同时支持 Yunzai NG**：同一份代码在 TRSS-Yunzai 与 [Yunzai NG](https://github.com/Yunzai-NG/yunzai-ng) 上都能跑。做法是把对宿主的依赖（日志、账号、数据目录、配置、出图）收进一层适配器（`host/`），指令逻辑一份不动；NG 侧另有 `configSchema` 面板配置、`ctx.cron` 定时任务（改 cron 立即生效）、出图走内核 `ctx.render` 交给渲染器插件。详见 [装在 Yunzai NG 上](#装在-yunzai-ng-上)。
 - **新增 Sub2API 站点支持**（自建 Go 网关，前端标题 `Sub2API - AI API Gateway`，域名任意）。接口体系与 new-api 系完全不同（前缀 `/api/v1`、响应统一 `{ code, message, data }`、余额字段本身就是美元），插件靠公开配置接口自动识别，无需用户指定类型。鉴权是 JWT：优先用未过期的 access_token，过期则纯 HTTP 续期，都失效时才开浏览器过码重登；一次性的 refresh_token 轮换后立即落盘，避免续期与超时竞争把令牌写丢。
 - **新增 `#中转添加刷新令牌` 指令**：登录人机验证等级过高、本机过不去码的 Sub2API 站点，可直接用浏览器里抓到的 refresh_token 绑定，全程不开浏览器。
 - **图形验证码自动识别（ddddocr）**：部分 NewAPI 魔改站签到要填图形验证码，插件自动取码 → 本地 OCR → 带答案重提，答错自动换新码，最多重试 15 次。解释器按「环境变量 → 插件自带 `.venv` → PATH」顺序解析，缺依赖时把 `ModuleNotFoundError` 压成一行安装提示，不再把整段 traceback 渲染进推送图。
@@ -93,9 +93,14 @@ TypeScript、零全局变量、插件可装可卸可热重载）。把仓库放�
 cd "$YZNG_HOME/plugins"          # 默认就是 NG 的启动目录
 git clone https://github.com/cchanlan/relay-checkin-plugin
 cd relay-checkin-plugin
-# NG 侧不像 TRSS 那样有现成的 puppeteer / art-template 可蹭，要自己装
-PUPPETEER_SKIP_DOWNLOAD=1 npm install   # 插件会自动找系统 Chrome/Edge，不必下 Chromium
+# NG 侧不像 TRSS 那样有现成依赖可蹭，要自己装。puppeteer 只用于过 WAF / Turnstile，
+# 出图不需要它（走内核渲染器），插件也会自动找系统 Chrome/Edge，所以可以跳过 Chromium 下载
+PUPPETEER_SKIP_DOWNLOAD=1 npm install
 ```
+
+**出图需要一个渲染器插件。** NG 的内核不自带渲染实现（`ctx.render` 会去找已注册的渲染器），
+本插件也不自带、更不自己注册 —— 模板在插件里编译成 HTML，截图交给内核选中的渲染器。
+没装渲染器时所有指令都会退化成文本回复，并在日志里说明原因。
 
 重启 NG（或在面板里装载插件）后：
 
@@ -105,17 +110,18 @@ PUPPETEER_SKIP_DOWNLOAD=1 npm install   # 插件会自动找系统 Chrome/Edge�
   不再写进插件安装目录
 - 指令、绑定流程、定时推送、浏览器过码、验证码识别与 TRSS 侧完全一致
 
-两个宿主的差异只有三处：
+两个宿主的差异只有四处：
 
 | | TRSS-Yunzai | Yunzai NG |
 |---|---|---|
 | 改 `schedule.cron` | 需重启 Yunzai | **立即生效**（插件监听配置变更后重建定时任务） |
 | `#中转插件更新` | 可用（走 Yunzai 自带更新） | 不提供，用 NG 面板/插件市场更新 |
 | 配置界面 | 锅巴（`guoba.support.js`） | NG 自带面板（`configSchema`） |
+| 出图 | Yunzai 自带的 `lib/puppeteer` | 内核 `ctx.render` → 你装的渲染器插件 |
 
 > NG 目前还没有官方 QQ 适配器与渲染器插件（`adapter-napcat`、`renderer-puppeteer` 两个仓库尚未公开），
-> 所以出图由本插件自带的 art-template + puppeteer 完成；收发消息需要等 NG 的适配器放出来。
-> 本插件在 NG 内核上的加载、指令、出图、定时任务、卸载回收均已用内核自带的 mock 适配器实测通过。
+> 所以在 NG 上收发消息与出图都要等这两类插件放出来。本插件在 NG 内核上的加载、指令分发、
+> 配置生成、定时任务重建、出图通路与卸载回收均已用内核自带的 mock 适配器实测通过。
 
 ## 指令
 

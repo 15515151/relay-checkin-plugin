@@ -5,11 +5,11 @@
  * 与 TRSS 侧的差异都收在这一个文件里：
  *   - 数据目录是内核给每个插件分的 ctx.dataDir（不再写进插件安装目录）
  *   - 配置由内核按 configSchema 管理，面板保存即生效，不需要 chokidar
- *   - 出图是插件自带的 art-template + puppeteer（NG 还没有官方渲染器插件）
+ *   - 出图走内核的 ctx.render（渲染器由用户装的渲染器插件提供，本插件不自带浏览器）
  */
 import { seg } from '@yunzai-ng/core'
 import { withDefaults } from '../models/config.js'
-import { renderToImage } from '../ng/render.js'
+import { renderViaCore } from '../ng/render.js'
 
 /**
  * 造一个 NG 宿主实现
@@ -99,9 +99,11 @@ export function createNgHost(ctx) {
       return bot ? wrapBot(bot) : null
     },
 
-    async renderTemplate(tplName, data) {
-      const image = await renderToImage(tplName, data)
-      return image ? seg.image(image) : false
+    /**
+     * 出图：模板在插件里编译，截图交给内核选中的渲染器（ctx.render）
+     */
+    renderTemplate(tplName, data) {
+      return renderViaCore(ctx, tplName, data)
     }
   }
 }
