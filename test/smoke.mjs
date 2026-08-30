@@ -429,8 +429,8 @@ try {
   )
   assert.deepEqual(
     detachedWidgetClickPoint({ x: 240, y: 300, width: 300, height: 65 }),
-    { x: 262, y: 332 },
-    'Turnstile 复选框应按实际 widget 矩形计算中心坐标'
+    { x: 270, y: 332 },
+    'Turnstile 复选框的固定偏移是 Xvfb 实测误差 0 的 (30, 32)，改小会点在框外'
   )
   assert.deepEqual(
     detachedWidgetClickPoint({ x: 240, y: 300, width: 300, height: 72, point: { x: 258, y: 334 } }),

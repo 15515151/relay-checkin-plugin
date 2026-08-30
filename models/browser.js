@@ -1638,9 +1638,10 @@ export async function solveTurnstile(page, siteKey, timeoutSec, { interactive = 
 /**
  * 脱离 CDP 的验证面板在页面里的固定位置。主进程断开调试连接后无法再查询元素坐标，
  * 只能把组件钉死在这里，再按窗口几何换算出屏幕坐标去点。
- * 复选框位于 widget 左上角内约 (22, 32)；实际位置优先从渲染后的容器读取。
+ * 复选框位于 widget 左上角内 (30, 32) —— 这是 Xvfb 上用假 widget 回读 clientX/Y
+ * 实测误差 0 的值，别按目测改小：复选框只有约 20px 宽，偏 8px 就点在框外了。
  */
-const DETACHED_WIDGET = { left: 240, top: 300, width: 300, height: 65, boxX: 22, boxY: 32 }
+const DETACHED_WIDGET = { left: 240, top: 300, width: 300, height: 65, boxX: 30, boxY: 32 }
 
 /**
  * 计算 widget 内复选框中心的视口坐标。真实矩形来自页面时优先使用它，固定面板则作为回退。
@@ -1668,7 +1669,7 @@ export function detachedWidgetClickPoint(widget = null) {
  * 结果写在 window.__relayCheckin 上，等挑战结束后主进程重连 CDP 取回。
  */
 function detachedTurnstilePageScript(cfg) {
-  const state = { round: 0, log: [], result: null, widget: null }
+  const state = { round: 0, log: [], result: null }
   window.__relayCheckin = state
   const log = (step, extra) => state.log.push({ at: Date.now(), step, ...(extra || {}) })
 
@@ -1691,21 +1692,6 @@ function detachedTurnstilePageScript(cfg) {
     holder.style.cssText = `position:fixed;left:${cfg.left}px;top:${cfg.top}px;z-index:2147483647`
     overlay.append(tip, holder, status)
     document.body.appendChild(overlay)
-
-    const recordWidget = () => {
-      const iframe = [...holder.querySelectorAll('iframe')].find(item => {
-        try { return /challenges\.cloudflare\.com|turnstile/i.test(item.src || '') } catch { return false }
-      })
-      const rect = (iframe || holder).getBoundingClientRect()
-      if (rect.width < 1 || rect.height < 1) return
-      state.widget = {
-        source: iframe ? 'iframe' : 'holder',
-        x: Math.round(rect.x),
-        y: Math.round(rect.y),
-        width: Math.round(rect.width),
-        height: Math.round(rect.height)
-      }
-    }
 
     const submit = async token => {
       log('token', { len: token.length })
@@ -1759,9 +1745,6 @@ function detachedTurnstilePageScript(cfg) {
           'expired-callback': () => onFail('expired')
         })
         state.round = 1
-        recordWidget()
-        requestAnimationFrame(recordWidget)
-        setTimeout(recordWidget, 250)
         status.textContent = '请勾选复选框完成验证'
       } catch (err) {
         giveUp('render-error')
@@ -1882,90 +1865,6 @@ async function closeDetachedBrowser(ws, proc) {
   } catch { /* 连不上就直接杀进程 */ }
   // 连整棵进程树一起收：只杀主进程会留下渲染子进程继续占着一次性档案目录
   if (proc?.pid) killProcessTree(proc.pid)
-}
-
-/**
- * 在仍保持 attach 的短窗口里读取实际 Turnstile 容器尺寸。自治脚本把组件放在固定
- * holder 中，组件若藏在 closed shadow root，holder 仍会反映真实布局尺寸；取不到时
- * 调用方继续使用固定回退坐标。
- */
-async function readDetachedWidget(page, timeoutMs = 6000) {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const remaining = deadline - Date.now()
-    const exact = await readDetachedCheckboxPoint(page, Math.min(1200, remaining))
-    if (exact) return exact
-    const holder = await withTimeout(page.evaluate(() => {
-      const holder = document.getElementById('relay-checkin-turnstile-holder')
-      if (!holder) return null
-      const iframe = [...holder.querySelectorAll('iframe')].find(item => {
-        try { return /challenges\.cloudflare\.com|turnstile/i.test(item.src || '') } catch { return false }
-      })
-      const rect = (iframe || holder).getBoundingClientRect()
-      if (rect.width < 1 || rect.height < 1) return null
-      return {
-        source: iframe ? 'iframe' : 'holder',
-        x: Math.round(rect.x),
-        y: Math.round(rect.y),
-        width: Math.round(rect.width),
-        height: Math.round(rect.height)
-      }
-    }), Math.min(1000, Math.max(1, deadline - Date.now())), '读取 Turnstile 容器坐标超时').catch(() => null)
-    if (holder) return holder
-    await waitMs(250)
-  }
-  return null
-}
-
-/**
- * 在断开 CDP 前借助无障碍树读取 Turnstile iframe 内真实 checkbox 的视口坐标。
- * iframe 往往藏在 closed shadow root，页面 DOM 看不到它，但 frame tree/AX tree 仍可见。
- */
-async function readDetachedCheckboxPoint(page, timeoutMs = 1200) {
-  const deadline = Date.now() + timeoutMs
-  const frames = typeof page.frames === 'function'
-    ? page.frames().filter(frame => /challenges\.cloudflare\.com|turnstile/i.test(String(frame.url?.() || '')))
-    : []
-  for (const frame of frames) {
-    const remaining = deadline - Date.now()
-    if (remaining <= 0) break
-    let owner = null
-    try {
-      let ownerBox = null
-      if (typeof frame?.frameElement === 'function') {
-        owner = await withTimeout(frame.frameElement(), Math.min(700, remaining), '定位 Turnstile iframe 超时')
-        ownerBox = owner
-          ? await withTimeout(owner.boundingBox(), Math.min(700, Math.max(1, deadline - Date.now())), '读取 Turnstile iframe 坐标超时')
-          : null
-      } else {
-        ownerBox = await legacyFrameOwnerBox(page, frame, {
-          timeoutMs: Math.min(700, Math.max(1, deadline - Date.now()))
-        })
-      }
-      if (!ownerBox || ownerBox.width < 200 || ownerBox.height < 50) continue
-      const ready = await turnstileCheckboxPoint(page, frame, ownerBox, {
-        timeoutMs: Math.min(700, Math.max(1, deadline - Date.now()))
-      })
-      if (ready?.point) {
-        return {
-          source: 'ax-checkbox',
-          x: Math.round(ownerBox.x),
-          y: Math.round(ownerBox.y),
-          width: Math.round(ownerBox.width),
-          height: Math.round(ownerBox.height),
-          point: {
-            x: Math.round(ready.point.x),
-            y: Math.round(ready.point.y)
-          }
-        }
-      }
-    } catch {
-      // iframe/AX 树在重建时会短暂失效，交给下一轮轮询或 holder 回退
-    } finally {
-      try { await owner?.dispose?.() } catch { /* frame 可能已经重建 */ }
-    }
-  }
-  return null
 }
 
 /**
@@ -2223,7 +2122,6 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
     await noteBrowserKernel(browser, executablePath)
 
     let geom = null
-    let widget = null
     try {
       const page = await newPageSafe(browser, 30000, { reuseBlank: true })
       if (proxy?.auth) await withTimeout(page.authenticate(proxy.auth), 15000, '设置代理认证超时')
@@ -2240,7 +2138,6 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
         maxRetries: 2
       }), 15000, '注入验证脚本超时')
       await navigateForTurnstile(page, account.baseUrl)
-      widget = await readDetachedWidget(page)
       geom = await withTimeout(page.evaluate(() => ({
         screenX: window.screenX,
         screenY: window.screenY,
@@ -2256,8 +2153,11 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
       try { browser.disconnect() } catch { /* 已断开 */ }
     }
 
-    const widgetBox = widget || {
-      source: 'fixed-fallback',
+    // 组件位置只用固定面板：断开 CDP 前去读真实矩形要对 Cloudflare 的 iframe 发
+    // DOM/Accessibility 调用，而 attach 期间的任何探测都会让挑战被判 bot（见 solveTurnstile 注释）。
+    // 固定坐标本来就是实测误差 0 的，不值得为几像素冒这个风险。
+    const widgetBox = {
+      source: 'fixed',
       x: DETACHED_WIDGET.left,
       y: DETACHED_WIDGET.top,
       width: DETACHED_WIDGET.width,
