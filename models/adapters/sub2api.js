@@ -11,19 +11,61 @@ import { logger } from '../../host/index.js'
  * （balance / free_balance），不存在 new-api 的 quota 换算。
  *
  * 鉴权是 JWT：邮箱密码登录换 access_token（24 小时）+ refresh_token。
- * 站点默认对「登录」开启 Turnstile，但「签到」通常不需要
- * （/check-in/status 的 turnstile_required 字段决定），因此：
+ * 签到是否要人机验证由 /checkin/status 决定，因此：
  *   1. 优先用未过期的 access_token 直接调接口；
  *   2. 过期则用 refresh_token 纯 HTTP 续期（不开浏览器）；
  *   3. refresh 也失效时才开浏览器过码重新登录。
  *
  * refresh_token 是一次性的：每次 /auth/refresh 都会轮换，旧值立刻 401，
  * 所以换到新值必须立即写回 account 交由 store 落盘，否则下轮只能重新过码。
+ *
+ * 签到接口存在两代形态，实测同一套前端代码分别对应：
+ *   新版：GET /checkin/status + POST /checkin/attempt + POST /checkin
+ *         字段 checked_in / captcha_enabled / captcha_provider / captcha_site_key，
+ *         提交要带上 attempt 换来的 attempt_id 与 captcha_token（三步）。
+ *   旧版：GET /check-in/status + POST /check-in
+ *         字段 checked_in_today / turnstile_required / turnstile_site_key（一步）。
+ * 两者路径只差一个连字符，旧代码在新版站点上会拿到 404 并被当成「不支持签到」
+ * 而静默跳过，所以这里按 host 探测一次形态再缓存。
  */
 
 const API = '/api/v1'
 // access_token 名义有效期 24 小时，留 5 分钟余量避免边界上恰好过期
 const EXPIRY_SAFETY_MS = 5 * 60 * 1000
+
+// 探测顺序：新版在前。命中后按 host 缓存，避免每轮签到都白打一次 404
+const CHECKIN_SHAPES = [
+  { name: 'v2', statusPath: '/checkin/status', attemptPath: '/checkin/attempt', claimPath: '/checkin' },
+  { name: 'v1', statusPath: '/check-in/status', attemptPath: '', claimPath: '/check-in' }
+]
+const checkinShapeCache = new Map()
+
+// attempt 相关的失败都由服务端判定上下文（IP、指纹、有效期），重试没有意义，
+// 但要能在日志里区分开，否则只会看到一个笼统的「签到失败」。
+// 名单取自站点前端的同名集合，另外补上验证码绑定信息不符的几种。
+const ATTEMPT_REASONS = new Set([
+  'DAILY_CHECKIN_ATTEMPT_REQUIRED',
+  'DAILY_CHECKIN_ATTEMPT_INVALID',
+  'DAILY_CHECKIN_ATTEMPT_EXPIRED',
+  'DAILY_CHECKIN_ATTEMPT_USED',
+  'DAILY_CHECKIN_ATTEMPT_IP_MISMATCH',
+  'DAILY_CHECKIN_ATTEMPT_CONTEXT_MISMATCH',
+  'DAILY_CHECKIN_ATTEMPT_STORE_UNAVAILABLE'
+])
+
+// 验证码本身有效，但与 attempt 声明的绑定信息对不上（action / cData / hostname），
+// 或同一 token 被重放。这类要单独说明：重试能解决，但得重新取 attempt 再过一次码
+const CAPTCHA_BINDING_REASONS = new Set([
+  'DAILY_CHECKIN_CAPTCHA_ACTION_MISMATCH',
+  'DAILY_CHECKIN_CAPTCHA_CDATA_MISMATCH',
+  'DAILY_CHECKIN_CAPTCHA_HOSTNAME_MISMATCH',
+  'CAPTCHA_TOKEN_REPLAYED',
+  'CAPTCHA_REPLAY_GUARD_UNAVAILABLE'
+])
+
+function hostOf(account) {
+  try { return new URL(account.baseUrl).hostname } catch { return String(account.baseUrl || '') }
+}
 
 function apiUrl(account, path) {
   return `${account.baseUrl}${API}${path}`
@@ -47,11 +89,13 @@ function usd(value) {
 }
 
 /**
- * 余额展示：付费余额为主，免费额度单独标出（两者用途不同，合计会误导）
+ * 余额展示：付费余额为主，免费额度单独标出（两者用途不同，合计会误导）。
+ * 免费额度的字段名随接口换代改过：旧版 free_balance，新版 gift_balance。
+ * 用 ?? 而不是 ||：旧版余额为 0 时不能被当成缺失而去读另一个字段。
  */
 function balanceText(data) {
   const paid = usd(data?.balance)
-  const free = usd(data?.free_balance)
+  const free = usd(data?.free_balance ?? data?.gift_balance)
   if (paid && free) return `${paid} (免费 ${free})`
   return paid || free || '-'
 }
@@ -206,27 +250,39 @@ const adapter = {
   },
 
   async getCheckinStatus(account) {
-    const res = await authed(account, '/check-in/status')
-    if (res.authFailed) return { supported: true, ok: false, msg: res.msg }
-    if (res.status === 404) return { supported: false }
-    const { ok, data, msg } = unwrap(res)
-    if (!ok || typeof data?.checked_in_today !== 'boolean') {
-      return { supported: true, ok: false, msg: msg || `签到状态查询失败 (HTTP ${res.status})` }
+    const host = hostOf(account)
+    const cached = checkinShapeCache.get(host)
+    const shapes = cached ? [cached] : CHECKIN_SHAPES
+    for (let i = 0; i < shapes.length; i++) {
+      const shape = shapes[i]
+      const isLast = i + 1 >= shapes.length
+      let res
+      try {
+        res = await authed(account, shape.statusPath)
+      } catch (err) {
+        // 探测阶段的请求异常先让给下一个形态；到最后一个还失败才算真失败
+        if (!isLast) continue
+        throw err
+      }
+      if (res.authFailed) return { supported: true, ok: false, msg: res.msg }
+      // 只有 404 才算「这个形态不对」，其余状态码都按当前形态解析
+      if (res.status === 404 && !isLast) continue
+      if (res.status === 404) return { supported: false }
+      if (!cached) {
+        checkinShapeCache.set(host, shape)
+        logger.info(`[relay-checkin-plugin] ${host} 使用 ${shape.name} 版签到接口（${API}${shape.statusPath}）`)
+      }
+      return { ...parseCheckinStatus(res), shape }
     }
-    return {
-      supported: true,
-      ok: true,
-      checked: data.checked_in_today,
-      // 站点管理端可单独给签到开 Turnstile；开了就得在浏览器里取 token
-      turnstileRequired: data.turnstile_required === true,
-      siteKey: data.turnstile_site_key || '',
-      awardText: data.checked_in_today ? usd(data.today_reward) : null,
-      balanceText: balanceText(data)
-    }
+    return { supported: false }
   },
 
   async checkin(account) {
     const status = await this.getCheckinStatus(account)
+    if (status.supported === false) return { ok: false, already: false, msg: '站点没有签到接口' }
+    if (status.ok && status.enabled === false) {
+      return { ok: false, already: false, msg: '站点已关闭签到功能' }
+    }
     if (status.ok && status.checked) {
       return {
         ok: true,
@@ -236,21 +292,76 @@ const adapter = {
         balanceText: status.balanceText
       }
     }
+    if (!status.ok) return { ok: false, already: false, msg: status.msg }
+    // 站点可以把签到验证换成 cap / hcaptcha / recaptcha，这些插件都还不会过，
+    // 明说比让用户等一轮超时更有用。validation 用 'unsupported'：executor 认得出
+    // 它不是 turnstile/pow/captcha，于是跳过所有降级尝试并原样保留这句提示
+    if (status.unsupportedCaptcha) {
+      return {
+        ok: false,
+        already: false,
+        validation: 'unsupported',
+        msg: `签到改用 ${status.unsupportedCaptcha} 验证，暂不支持自动通过`
+      }
+    }
+
+    const shape = status.shape || checkinShapeCache.get(hostOf(account)) || CHECKIN_SHAPES[1]
+    // 新版是三步：attempt 换 attempt_id → 过码 → 带 attempt_id + captcha_token 提交。
+    // attempt 自带 expires_at 且服务端会校验 IP/上下文，所以取到就要尽快过码提交。
+    let attemptId = ''
+    let siteKey = status.siteKey
+    let captchaAction = ''
+    let captchaCdata = ''
+    if (status.captchaRequired && shape.attemptPath) {
+      const attempt = await authed(account, shape.attemptPath, { method: 'POST', body: {} })
+      if (attempt.authFailed) return { ok: false, already: false, msg: attempt.msg }
+      const parsedAttempt = unwrap(attempt)
+      if (!parsedAttempt.ok || !parsedAttempt.data?.attempt_id) {
+        if (/ALREADY_DONE|already checked in/i.test(`${parsedAttempt.reason} ${parsedAttempt.msg}`)) {
+          return { ok: true, already: true, confirmed: true, balanceText: status.balanceText }
+        }
+        logger.warn(`[relay-checkin-plugin] ${account.name} 创建签到凭证失败`
+          + `（HTTP ${attempt.status}${parsedAttempt.reason ? `｜${parsedAttempt.reason}` : ''}）`
+          + `${parsedAttempt.msg ? `：${parsedAttempt.msg}` : ''}`)
+        return { ok: false, already: false, msg: parsedAttempt.msg || '创建签到凭证失败，请稍后重试' }
+      }
+      attemptId = parsedAttempt.data.attempt_id
+      // attempt 会带自己的 site key 与挑战绑定信息，全部以 attempt 为准：
+      // action / cData 对不上时后端回 DAILY_CHECKIN_CAPTCHA_ACTION_MISMATCH
+      siteKey = parsedAttempt.data.captcha_site_key || siteKey
+      captchaAction = parsedAttempt.data.captcha_action || ''
+      captchaCdata = parsedAttempt.data.captcha_cdata || ''
+      const provider = String(parsedAttempt.data.captcha_provider || '').toLowerCase()
+      if (provider && provider !== 'none' && provider !== 'turnstile') {
+        return {
+          ok: false,
+          already: false,
+          validation: 'unsupported',
+          msg: `签到改用 ${provider} 验证，暂不支持自动通过`
+        }
+      }
+    }
 
     // 签到开了 Turnstile 时先在浏览器里取 token（登录本身也可能顺带完成）
     let turnstileToken = ''
-    if (status.ok && status.turnstileRequired) {
-      const solved = await sub2apiLogin(account, { siteKey: status.siteKey, tokenOnly: true })
+    if (status.captchaRequired) {
+      const solved = await sub2apiLogin(account, {
+        siteKey,
+        tokenOnly: true,
+        action: captchaAction,
+        cdata: captchaCdata
+      })
       if (!solved.ok) {
         return { ok: false, already: false, validation: 'turnstile', msg: solved.msg }
       }
       turnstileToken = solved.turnstileToken || ''
     }
 
-    const res = await authed(account, '/check-in', {
-      method: 'POST',
-      body: { turnstile_token: turnstileToken }
-    })
+    // 两代形态的字段名不同：新版认 captcha_token + attempt_id，旧版认 turnstile_token
+    const body = shape.attemptPath
+      ? { attempt_id: attemptId || undefined, captcha_token: turnstileToken || undefined }
+      : { turnstile_token: turnstileToken }
+    const res = await authed(account, shape.claimPath, { method: 'POST', body })
     if (res.authFailed) return { ok: false, already: false, msg: res.msg }
     return parseSub2apiCheckin(res)
   },
@@ -277,24 +388,70 @@ const adapter = {
  */
 export function parseSub2apiCheckin(res) {
   const { ok, data, msg, reason } = unwrap(res)
-  if (/TURNSTILE/i.test(reason) || /turnstile/i.test(msg)) {
+  if (CAPTCHA_BINDING_REASONS.has(String(reason))) {
+    // token 有效但绑定信息不符：下一轮会重新取 attempt 并按它声明的 action/cData 过码
+    return { ok: false, already: false, msg: '验证凭据与站点声明的绑定信息不符，下轮会重新取凭证' }
+  }
+  if (ATTEMPT_REASONS.has(String(reason))) {
+    // attempt 类失败是服务端对 IP / 指纹 / 有效期的判定，重试同一份凭证没用
+    return { ok: false, already: false, msg: '签到凭证未被站点接受，请稍后重试' }
+  }
+  if (/RATE_LIMITED/i.test(reason)) {
+    return { ok: false, already: false, msg: '签到过于频繁，已被站点限流，请稍后重试' }
+  }
+  if (/ALREADY_DONE/i.test(reason)) {
+    return { ok: true, already: true, confirmed: true, msg: '今日已签到' }
+  }
+  if (/CAPTCHA|TURNSTILE/i.test(reason) || /turnstile|captcha/i.test(msg)) {
     return { ok: false, already: false, validation: 'turnstile', msg: msg || '签到要求人机验证' }
   }
   if (res.status === 401 || res.status === 403) {
-    return { ok: false, already: false, msg: `凭据无效或已过期 (HTTP ${res.status})` }
+    return { ok: false, already: false, msg: '凭据无效，请重新绑定' }
   }
   if (!ok) {
     if (/already|已签/i.test(msg)) return { ok: true, already: true, confirmed: true, msg: '今日已签到' }
-    return { ok: false, already: false, msg: msg || `签到失败 (HTTP ${res.status})` }
+    return { ok: false, already: false, msg: msg || '签到失败' }
   }
   const already = data?.already_checked_in === true
   return {
     ok: true,
     already,
     confirmed: true,
-    awardText: usd(data?.reward_amount) ?? (already ? usd(data?.today_reward) : null),
+    awardText: usd(data?.reward_amount)
+      ?? usd(data?.today_reward)
+      ?? usd(data?.reward_template?.value)
+      ?? null,
     balanceText: balanceText(data),
     msg: ''
+  }
+}
+
+/**
+ * 解析两代形态的签到状态。字段名整代变过，用 ?? 而不是 || ：
+ * checked_in 为 false 时不能被当成缺失而回落到另一个字段。
+ */
+export function parseCheckinStatus(res) {
+  const { ok, data, msg } = unwrap(res)
+  const checked = data?.checked_in ?? data?.checked_in_today
+  if (!ok || typeof checked !== 'boolean') {
+    return { supported: true, ok: false, msg: msg || `签到状态查询失败 (HTTP ${res.status})` }
+  }
+  const captchaOn = (data.captcha_enabled ?? data.turnstile_required) === true
+  const provider = String(data.captcha_provider || (captchaOn ? 'turnstile' : '')).toLowerCase()
+  const knownProvider = !provider || provider === 'none' || provider === 'turnstile'
+  return {
+    supported: true,
+    ok: true,
+    checked,
+    // 站点可以整体关掉签到功能，这时 enabled 为 false 但接口仍在
+    enabled: data.enabled !== false,
+    captchaRequired: captchaOn && knownProvider,
+    unsupportedCaptcha: captchaOn && !knownProvider ? provider : '',
+    siteKey: data.captcha_site_key || data.turnstile_site_key || '',
+    awardText: checked
+      ? (usd(data.today_reward) ?? usd(data.reward_template?.value) ?? null)
+      : null,
+    balanceText: balanceText(data)
   }
 }
 

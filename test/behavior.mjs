@@ -49,7 +49,7 @@ try {
   const cfgMod = await import('../models/config.js')
   const cfgNow = cfgMod.getConfig()
   cfgNow.security.allowedPrivateHosts = [
-    'agentrouter.org', 'newapi.test', 'n.com', 'v.com', 'x.com', 't.com', 'anyrouter.top', 's2.test'
+    'agentrouter.org', 'newapi.test', 'n.com', 'v.com', 'x.com', 't.com', 'anyrouter.top', 's2.test', 's2v2.test'
   ]
   // 同理，测试也不能受运行环境（data/config.yaml 或 config_default 模板）里的代理配置影响：
   // 命中 proxy.hosts 的站点会走 node:https + proxy agent，完全绕过上面的 mock fetch
@@ -322,6 +322,7 @@ try {
   // 签到全链路：状态未签 → POST 领取 → 状态复核已签；奖励与余额都是站点直接给的美元
   let s2StatusCalls = 0
   routes = {
+    'GET https://s2.test/api/v1/checkin/status': { status: 404, body: null },
     'GET https://s2.test/api/v1/check-in/status': () => {
       s2StatusCalls++
       const checked = s2StatusCalls > 2
@@ -360,6 +361,99 @@ try {
   const s2Again = await checkinAccount({ ...S2(), token: '', accessToken: 'AT_OK', tokenExpiresAt: Date.now() + 3600000 })
   assert.equal(s2Again.status, 'already')
   assert.equal(s2Again.award, '今日 +$0.50')
+
+  // ---- Sub2API 新版形态：路径无连字符、字段整代改名，签到走 attempt + claim 两步 ----
+  // 这一代站点上，旧代码会在 /check-in/status 拿到 404 并把站点当成「不支持签到」而静默跳过。
+  // 用另一个域名：适配器按 host 缓存接口形态，复用 s2.test 会命中上面已探测出的旧版
+  const S2V2 = () => ({ ...S2(), name: 's2v2.test', baseUrl: 'https://s2v2.test' })
+  let v2ClaimBody = null
+  let v2AttemptCalls = 0
+  routes = {
+    'GET https://s2v2.test/api/v1/checkin/status': {
+      status: 200,
+      body: {
+        code: 0,
+        data: {
+          enabled: true,
+          checked_in: false,
+          captcha_enabled: false,
+          captcha_provider: 'turnstile',
+          captcha_site_key: '0xSITEKEY',
+          reward_template: { type: 'gift_balance', value: 0.4 },
+          balance: 3.6,
+          gift_balance: 0.25
+        }
+      }
+    },
+    'POST https://s2v2.test/api/v1/checkin/attempt': () => {
+      v2AttemptCalls++
+      return {
+        status: 200,
+        body: {
+          code: 0,
+          data: {
+            attempt_id: 'A1',
+            captcha_provider: 'turnstile',
+            captcha_site_key: '0xSITEKEY',
+            captcha_action: 'daily_checkin',
+            captcha_cdata: 'CD1'
+          }
+        }
+      }
+    },
+    'POST https://s2v2.test/api/v1/checkin': {
+      status: 200,
+      capture: opts => { v2ClaimBody = JSON.parse(opts.body) },
+      body: { code: 0, data: { already_checked_in: false, reward_amount: 0.4, balance: 4, gift_balance: 0.25 } }
+    },
+    'GET https://s2v2.test/api/v1/auth/me': {
+      status: 200,
+      body: { code: 0, data: { id: 5, username: 's5', balance: 4, gift_balance: 0.25, total_recharged: 10 } }
+    }
+  }
+  const s2v2 = await checkinAccount({ ...S2V2(), token: '', accessToken: 'AT_OK', tokenExpiresAt: Date.now() + 3600000 })
+  assert.equal(s2v2.status, 'ok', '新版形态应能正常签到，而不是被当成不支持签到')
+  assert.equal(s2v2.award, '+$0.40', '新版的奖励字段是 reward_amount')
+  // 免费额度也改了名：漏掉 gift_balance 就只会显示付费余额
+  assert.equal(s2v2.balance, '$4.00 (免费 $0.25)', '新版的免费额度字段是 gift_balance')
+  assert.equal(v2AttemptCalls, 0, '站点关闭验证码时不该多打一次 attempt')
+  assert.deepEqual(v2ClaimBody, {}, '无需验证码时提交体不应带 attempt_id / captcha_token')
+
+  // 开了 Turnstile：必须先换 attempt_id，再连同 captcha_token 一起提交
+  const savedBrowserForV2 = cfgNow.browser.enable
+  routes['GET https://s2v2.test/api/v1/checkin/status'] = {
+    status: 200,
+    body: {
+      code: 0,
+      data: {
+        enabled: true, checked_in: false, captcha_enabled: true,
+        captcha_provider: 'turnstile', captcha_site_key: '0xSITEKEY',
+        reward_template: { value: 0.4 }, balance: 3.6, gift_balance: 0.25
+      }
+    }
+  }
+  cfgNow.browser.enable = false
+  const s2NeedCaptcha = await checkinAccount({ ...S2V2(), token: '', accessToken: 'AT_OK', tokenExpiresAt: Date.now() + 3600000 })
+  cfgNow.browser.enable = savedBrowserForV2
+  assert.equal(s2NeedCaptcha.status, 'fail', '关掉浏览器方案时应如实报失败')
+  assert.equal(v2AttemptCalls, 1, '开了验证码就必须先创建 attempt')
+
+  // 验证方式换成插件不支持的 cap：直接说明，不再白等一轮过码
+  routes['GET https://s2v2.test/api/v1/checkin/status'] = {
+    status: 200,
+    body: {
+      code: 0,
+      data: {
+        enabled: true, checked_in: false, captcha_enabled: true,
+        captcha_provider: 'cap', captcha_site_key: '874e289103',
+        reward_template: { value: 0.4 }, balance: 3.6, gift_balance: 0.25
+      }
+    }
+  }
+  const s2Cap = await checkinAccount({ ...S2V2(), token: '', accessToken: 'AT_OK', tokenExpiresAt: Date.now() + 3600000 })
+  assert.equal(s2Cap.status, 'fail')
+  assert.match(s2Cap.msg, /cap/i, '不支持的验证方式要在文案里点名')
+  assert.equal(v2AttemptCalls, 1, '验证方式不支持时不该再去创建 attempt')
 
   // ---- 4. probeAccount：new-api 命中 ----
   let capturedAuth = ''

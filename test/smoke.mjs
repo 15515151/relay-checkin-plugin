@@ -725,6 +725,43 @@ try {
   assert.equal(getAdapter('不存在').type, 'newapi')
   console.log('adapters/index OK')
 
+  // ---- Sub2API 新版签到的失败原因分类 ----
+  // 这些 reason 取自站点前端的同名集合；分错类会让用户看到笼统的「签到失败」，
+  // 而 action/cData 不符其实是下轮重取 attempt 就能自愈的
+  const { parseSub2apiCheckin } = await import('../models/adapters/sub2api.js')
+  const s2res = (reason, extra = {}) => ({ status: 400, json: { code: 400, message: 'x', reason, ...extra } })
+  assert.match(
+    parseSub2apiCheckin(s2res('DAILY_CHECKIN_CAPTCHA_ACTION_MISMATCH')).msg,
+    /不符/,
+    'action 不符要说明是凭据与站点声明对不上，而非泛泛的签到失败'
+  )
+  assert.match(
+    parseSub2apiCheckin(s2res('CAPTCHA_TOKEN_REPLAYED')).msg,
+    /不符/,
+    'token 重放与绑定不符归为同一类处理'
+  )
+  assert.match(
+    parseSub2apiCheckin(s2res('DAILY_CHECKIN_ATTEMPT_EXPIRED')).msg,
+    /签到凭证/,
+    'attempt 过期属于凭证类失败'
+  )
+  assert.match(
+    parseSub2apiCheckin(s2res('DAILY_CHECKIN_RATE_LIMITED')).msg,
+    /限流/,
+    '限流要单独提示，避免用户立刻重试'
+  )
+  const s2Done = parseSub2apiCheckin(s2res('DAILY_CHECKIN_ALREADY_DONE'))
+  assert.equal(s2Done.ok, true, '站点回已签到应算成功')
+  assert.equal(s2Done.already, true)
+  const s2Ok = parseSub2apiCheckin({
+    status: 200,
+    json: { code: 0, data: { already_checked_in: false, reward_amount: 0.4, balance: 1, gift_balance: 2 } }
+  })
+  assert.equal(s2Ok.ok, true)
+  assert.equal(s2Ok.awardText, '$0.40')
+  assert.equal(s2Ok.balanceText, '$1.00 (免费 $2.00)', '成功响应也要按新版字段名取赠送余额')
+  console.log('adapters/sub2api 失败分类 OK')
+
   // ---- 各 adapter 请求头 ----
   const newapi = (await import('../models/adapters/newapi.js')).default
   let h = newapi.buildHeaders({ token: 'T', siteUserId: 5 })
