@@ -56,10 +56,21 @@ public class RelayNative {
 const PS_CANDIDATES = ['powershell.exe', 'pwsh.exe']
 let psExecutable = null
 
-/** 真实指针整体不可用（缺 xdotool / 缺 PowerShell），置位后不再重复尝试 */
+/**
+ * 真实指针整体暂不可用（缺 xdotool / 缺 PowerShell）。Linux 上工具可能在进程运行
+ * 期间才安装，不能把一次 ENOENT 永久当成不可用；nativePointerUnavailable() 会刷新状态。
+ */
 let pointerUnavailable = false
 
+function refreshPointerAvailability() {
+  if (!pointerUnavailable || process.platform !== 'linux') return
+  // 只探测可执行文件是否已经出现，不连接 X server，避免 DISPLAY 不可用时误判。
+  const probe = spawnSync('xdotool', ['-h'], { stdio: 'ignore' })
+  if (!probe.error || probe.error.code !== 'ENOENT') pointerUnavailable = false
+}
+
 export function nativePointerUnavailable() {
+  refreshPointerAvailability()
   return pointerUnavailable
 }
 
@@ -244,7 +255,7 @@ export function windowsClickCommand(x, y, windowId = '') {
  * @returns {Promise<boolean>} 点击是否成功执行
  */
 export async function nativeClick(display, x, y, { windowId = '' } = {}) {
-  if (!display || pointerUnavailable) return false
+  if (!display || nativePointerUnavailable()) return false
   if (display !== POINTER_WINDOWS) return await xdotoolClick(display, x, y, windowId)
   // Add-Type 首次编译要一两秒，超时给足；点击自身的时序全在脚本内部控制
   const res = await runPowerShell(windowsClickCommand(x, y, windowId), 25000)
@@ -259,11 +270,15 @@ export async function nativeClick(display, x, y, { windowId = '' } = {}) {
  * 返回的是**客户区**矩形（屏幕坐标 + 客户区尺寸），于是 detachedClickOrigin 里的
  * `height - innerHeight` 正好是标签栏 + 地址栏的高度，`width - innerWidth` 约为 0。
  */
-export function windowsWindowGeometryCommand(title) {
+export function windowsWindowGeometryCommand(title, pid = '') {
   // -like 的通配符只有 * ? []，窗口标题里是站点域名和固定前缀，不含这些
   const literal = String(title).replace(/'/g, "''")
+  const numericPid = Number(pid)
+  const selector = Number.isSafeInteger(numericPid) && numericPid > 0
+    ? `$proc = Get-Process -Id ${numericPid} -ErrorAction SilentlyContinue | Select-Object -First 1`
+    : `$proc = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like '*${literal}*' } | Select-Object -First 1`
   return `${PS_USER32}
-$proc = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like '*${literal}*' } | Select-Object -First 1
+${selector}
 if (-not $proc) { exit 3 }
 $hwnd = $proc.MainWindowHandle
 $rect = New-Object 'RelayNative+RECT'
@@ -283,20 +298,36 @@ $origin = New-Object 'RelayNative+POINT'
  * Chrome 自报的 outerHeight - innerHeight 并不可靠（没有窗口管理器的 Xvfb 上可能为 0，
  * 算出的点击点整体偏上、正好落在提示文字上——于是「点了却毫无反应」，Turnstile 连
  * error-callback 都不会触发）。系统给的数据不会骗人。
+ * @param {{pid?: string|number}} opts 可选 Chrome 主进程 PID；站点覆盖标题时优先按 PID 找
  * @returns {Promise<{windowId:string,x:number,y:number,width:number,height:number}|null>}
  */
-export async function nativeWindowGeometry(display, title) {
-  if (!display || pointerUnavailable) return null
+export async function nativeWindowGeometry(display, title, { pid = '' } = {}) {
+  if (!display || nativePointerUnavailable()) return null
   if (display === POINTER_WINDOWS) {
-    const res = await runPowerShell(windowsWindowGeometryCommand(title), 25000)
+    const res = await runPowerShell(windowsWindowGeometryCommand(title, pid), 25000)
     return res.ok ? parseShellGeometry(res.stdout) : null
   }
-  const res = await runCommand(
-    'xdotool',
-    ['search', '--onlyvisible', '--name', title, 'getwindowgeometry', '--shell'],
-    { timeoutMs: 8000, env: { ...process.env, DISPLAY: display } }
-  )
-  return parseShellGeometry(res.stdout)
+  // 站点脚本可能在导航后覆盖 document.title，优先按 Chrome 主进程 PID 找窗口，
+  // 标题查询仅作旧环境/找不到 PID 窗口时的后备。
+  for (const args of xdotoolWindowSearchArgs(title, pid)) {
+    const res = await runCommand('xdotool', args, {
+      timeoutMs: 8000,
+      env: { ...process.env, DISPLAY: display }
+    })
+    const geometry = parseShellGeometry(res.stdout)
+    if (geometry) return geometry
+  }
+  return null
+}
+
+/**
+ * 生成 xdotool 窗口查询参数。单独导出便于在无 X server 的环境验证 PID 优先级与标题回退。
+ */
+export function xdotoolWindowSearchArgs(title, pid = '') {
+  const queries = []
+  if (pid) queries.push(['search', '--onlyvisible', '--pid', String(pid), '.', 'getwindowgeometry', '--shell'])
+  if (title) queries.push(['search', '--onlyvisible', '--name', title, 'getwindowgeometry', '--shell'])
+  return queries
 }
 
 /**
@@ -305,7 +336,7 @@ export async function nativeWindowGeometry(display, title) {
  * @returns {Promise<string>} 形如 `(270, 332)`，取不到时为空串
  */
 export async function nativeMouseLocation(display) {
-  if (!display || pointerUnavailable) return ''
+  if (!display || nativePointerUnavailable()) return ''
   if (display === POINTER_WINDOWS) {
     const res = await runPowerShell(`${PS_USER32}
 $point = New-Object 'RelayNative+POINT'

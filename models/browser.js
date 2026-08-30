@@ -206,6 +206,50 @@ export function resolveBrowserExecutable(configured = '', {
     ?.executablePath || null
 }
 
+/**
+ * Turnstile 能接受的内核下限。实测同一台 Xvfb 服务器、同一站点、同一点击坐标：
+ * Puppeteer 13 自带的 Chromium 101 点完复选框只回 error-callback 600010，
+ * 换成 Chrome 152 后立刻签发 token。所以内核版本必须出现在日志和用户提示里，
+ * 否则这种失败只会被反复误判成坐标、指针或出口 IP 问题。
+ */
+const TURNSTILE_MIN_MAJOR = 120
+
+// 最近一次启动过码浏览器时得出的「内核过旧」结论，空串表示内核可用
+let staleKernelNotice = ''
+
+// 内核过旧时统一的用户可见结论：排障细节留在日志里，这里只说能怎么办
+const STALE_KERNEL_MESSAGE = '过码浏览器内核过旧，请在机器人运行设备安装新版 Chrome/Edge 后重试'
+
+/**
+ * 解析内核版本串并判断能否用于 Turnstile。
+ * @param {string} version 形如 Chrome/152.0.7977.64 或 HeadlessChrome/101.0.4950.0
+ * @param {boolean} bundled 是否为 Puppeteer 自带内核（升级办法不同，提示里要点明）
+ * @returns {string} 过旧时返回可直接写进日志的原因，够新时返回空串
+ */
+export function staleTurnstileKernel(version, bundled = false) {
+  const major = Number(String(version || '').match(/(\d+)\.\d/)?.[1] || 0)
+  if (!major || major >= TURNSTILE_MIN_MAJOR) return ''
+  return `过码内核为 ${String(version).trim()}，低于 Turnstile 可用下限 ${TURNSTILE_MIN_MAJOR}`
+    + '（此类内核点击复选框后仅返回 600010）'
+    + (bundled ? '；当前使用的是 Puppeteer 自带 Chromium' : '')
+}
+
+/**
+ * 每次启动过码浏览器后记一次内核结论：过旧就 warn 出确切版本与升级办法；
+ * 够新则清掉上次结论，避免装好新 Chrome 后仍在提示。
+ */
+async function noteBrowserKernel(browser, executablePath) {
+  const version = await withTimeout(browser.version(), 10000, '读取浏览器内核版本超时').catch(() => '')
+  staleKernelNotice = staleTurnstileKernel(version, !executablePath)
+  if (staleKernelNotice) {
+    logger.warn(`[relay-checkin-plugin] ${staleKernelNotice}：请在该设备安装新版 Chrome`
+      + '（Debian/Ubuntu: curl -fsSL'
+      + ' https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb'
+      + ' && apt install -y /tmp/chrome.deb），或把 browser.executablePath 指向已安装的新版内核')
+  }
+  return staleKernelNotice
+}
+
 // 反自动化检测：各项独立保护，任一项失败都不影响其余初始化。
 const STEALTH_SCRIPT = `
   try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }) } catch (e) {}
@@ -395,7 +439,10 @@ async function getBrowser(pool, proxy, { interactive = false, profileKey = '', e
         launchOptions.defaultViewport = null
         launchOptions.ignoreDefaultArgs = ['--enable-automation']
       }
-      return await puppeteer.launch(launchOptions)
+      const instance = await puppeteer.launch(launchOptions)
+      // 过码失败最常见的原因就是内核太旧，启动后先把版本结论固定下来
+      if (interactive) await noteBrowserKernel(instance, executablePath)
+      return instance
     })().then(inst => {
       pool.instance = inst
       pool.launching = null
@@ -546,14 +593,14 @@ export async function bypassServiceWorkerCompat(page) {
  * Puppeteer 20 之前没有 Frame.frameElement()。旧版仍暴露 frame id 与页面 CDP
  * 客户端，可由 DOM.getFrameOwner 取得跨域 iframe 的真实屏幕坐标。
  */
-export async function legacyFrameOwnerBox(page, frame) {
+export async function legacyFrameOwnerBox(page, frame, { timeoutMs = 5000 } = {}) {
   const frameId = frame?._id || frame?._frameId || (typeof frame?.id === 'function' ? frame.id() : null)
   const client = pageCdpClient(page)
   if (!frameId || !client || typeof client.send !== 'function') return null
 
   const owner = await withTimeout(
     client.send('DOM.getFrameOwner', { frameId }),
-    5000,
+    timeoutMs,
     '旧版 Puppeteer 定位 Turnstile frame 超时'
   )
   const node = owner?.backendNodeId
@@ -565,7 +612,7 @@ export async function legacyFrameOwnerBox(page, frame) {
 
   const result = await withTimeout(
     client.send('DOM.getBoxModel', node),
-    5000,
+    timeoutMs,
     '旧版 Puppeteer 读取 Turnstile 坐标超时'
   )
   const quad = result?.model?.border || result?.model?.content
@@ -584,7 +631,7 @@ export async function legacyFrameOwnerBox(page, frame) {
  * Chrome 无障碍树会在控件真正可交互后暴露 checkbox 节点；其坐标相对 iframe，
  * 加上 frame owner 坐标即可得到页面鼠标所需的精确位置。
  */
-export async function turnstileCheckboxPoint(page, frame, ownerBox) {
+export async function turnstileCheckboxPoint(page, frame, ownerBox, { timeoutMs = 5000 } = {}) {
   const frameId = frame?._id || frame?._frameId || (typeof frame?.id === 'function' ? frame.id() : null)
   let client = null
   try {
@@ -599,7 +646,7 @@ export async function turnstileCheckboxPoint(page, frame, ownerBox) {
 
   const tree = await withTimeout(
     client.send('Accessibility.getFullAXTree', { frameId }),
-    5000,
+    timeoutMs,
     '等待 Turnstile 复选框可交互超时'
   )
   const checkbox = tree?.nodes?.find(node => node?.role?.value === 'checkbox' && !node.ignored)
@@ -607,7 +654,7 @@ export async function turnstileCheckboxPoint(page, frame, ownerBox) {
 
   const result = await withTimeout(
     client.send('DOM.getBoxModel', { backendNodeId: checkbox.backendDOMNodeId }),
-    5000,
+    timeoutMs,
     '读取 Turnstile 复选框坐标超时'
   )
   const quad = result?.model?.border || result?.model?.content
@@ -1591,9 +1638,27 @@ export async function solveTurnstile(page, siteKey, timeoutSec, { interactive = 
 /**
  * 脱离 CDP 的验证面板在页面里的固定位置。主进程断开调试连接后无法再查询元素坐标，
  * 只能把组件钉死在这里，再按窗口几何换算出屏幕坐标去点。
- * 复选框位于 widget 左上角内约 (30, 32)。
+ * 复选框位于 widget 左上角内约 (22, 32)；实际位置优先从渲染后的容器读取。
  */
-const DETACHED_WIDGET = { left: 240, top: 300, boxX: 30, boxY: 32 }
+const DETACHED_WIDGET = { left: 240, top: 300, width: 300, height: 65, boxX: 22, boxY: 32 }
+
+/**
+ * 计算 widget 内复选框中心的视口坐标。真实矩形来自页面时优先使用它，固定面板则作为回退。
+ */
+export function detachedWidgetClickPoint(widget = null) {
+  const box = widget || DETACHED_WIDGET
+  if (widget?.point && Number.isFinite(widget.point.x) && Number.isFinite(widget.point.y)) {
+    return { x: widget.point.x, y: widget.point.y }
+  }
+  const x = Number.isFinite(box.x) ? box.x : box.left
+  const y = Number.isFinite(box.y) ? box.y : box.top
+  const width = Number.isFinite(box.width) ? box.width : DETACHED_WIDGET.width
+  const height = Number.isFinite(box.height) ? box.height : DETACHED_WIDGET.height
+  return {
+    x: x + Math.min(box.boxX ?? DETACHED_WIDGET.boxX, width / 2),
+    y: y + Math.min(box.boxY ?? DETACHED_WIDGET.boxY, height / 2)
+  }
+}
 
 /**
  * 页面内自治的「过码 + 签到」脚本，在 document-start 注入。
@@ -1603,7 +1668,7 @@ const DETACHED_WIDGET = { left: 240, top: 300, boxX: 30, boxY: 32 }
  * 结果写在 window.__relayCheckin 上，等挑战结束后主进程重连 CDP 取回。
  */
 function detachedTurnstilePageScript(cfg) {
-  const state = { round: 0, log: [], result: null }
+  const state = { round: 0, log: [], result: null, widget: null }
   window.__relayCheckin = state
   const log = (step, extra) => state.log.push({ at: Date.now(), step, ...(extra || {}) })
 
@@ -1622,9 +1687,25 @@ function detachedTurnstilePageScript(cfg) {
       + 'font-size:15px;line-height:1.7;color:#4b6152;z-index:2147483647'
     status.textContent = '正在加载验证组件...'
     const holder = document.createElement('div')
+    holder.id = 'relay-checkin-turnstile-holder'
     holder.style.cssText = `position:fixed;left:${cfg.left}px;top:${cfg.top}px;z-index:2147483647`
     overlay.append(tip, holder, status)
     document.body.appendChild(overlay)
+
+    const recordWidget = () => {
+      const iframe = [...holder.querySelectorAll('iframe')].find(item => {
+        try { return /challenges\.cloudflare\.com|turnstile/i.test(item.src || '') } catch { return false }
+      })
+      const rect = (iframe || holder).getBoundingClientRect()
+      if (rect.width < 1 || rect.height < 1) return
+      state.widget = {
+        source: iframe ? 'iframe' : 'holder',
+        x: Math.round(rect.x),
+        y: Math.round(rect.y),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height)
+      }
+    }
 
     const submit = async token => {
       log('token', { len: token.length })
@@ -1678,6 +1759,9 @@ function detachedTurnstilePageScript(cfg) {
           'expired-callback': () => onFail('expired')
         })
         state.round = 1
+        recordWidget()
+        requestAnimationFrame(recordWidget)
+        setTimeout(recordWidget, 250)
         status.textContent = '请勾选复选框完成验证'
       } catch (err) {
         giveUp('render-error')
@@ -1700,6 +1784,8 @@ function detachedTurnstilePageScript(cfg) {
 }
 
 function turnstileFailureMessage(result, timeoutSec, interactive = false) {
+  // 内核过旧时不管失败在哪一步都是同一个结论，直接给出可执行的办法
+  if (staleKernelNotice) return STALE_KERNEL_MESSAGE
   if (result?.reason === 'error-callback') {
     if (/^[36]\d{5}$/.test(result.errorCode || '')) {
       return `Turnstile 返回错误回调（错误码 ${result.errorCode}：Cloudflare 检测到浏览器或网络风险，请更新系统 Chrome/Edge 或更换网络）`
@@ -1799,12 +1885,97 @@ async function closeDetachedBrowser(ws, proc) {
 }
 
 /**
+ * 在仍保持 attach 的短窗口里读取实际 Turnstile 容器尺寸。自治脚本把组件放在固定
+ * holder 中，组件若藏在 closed shadow root，holder 仍会反映真实布局尺寸；取不到时
+ * 调用方继续使用固定回退坐标。
+ */
+async function readDetachedWidget(page, timeoutMs = 6000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const remaining = deadline - Date.now()
+    const exact = await readDetachedCheckboxPoint(page, Math.min(1200, remaining))
+    if (exact) return exact
+    const holder = await withTimeout(page.evaluate(() => {
+      const holder = document.getElementById('relay-checkin-turnstile-holder')
+      if (!holder) return null
+      const iframe = [...holder.querySelectorAll('iframe')].find(item => {
+        try { return /challenges\.cloudflare\.com|turnstile/i.test(item.src || '') } catch { return false }
+      })
+      const rect = (iframe || holder).getBoundingClientRect()
+      if (rect.width < 1 || rect.height < 1) return null
+      return {
+        source: iframe ? 'iframe' : 'holder',
+        x: Math.round(rect.x),
+        y: Math.round(rect.y),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height)
+      }
+    }), Math.min(1000, Math.max(1, deadline - Date.now())), '读取 Turnstile 容器坐标超时').catch(() => null)
+    if (holder) return holder
+    await waitMs(250)
+  }
+  return null
+}
+
+/**
+ * 在断开 CDP 前借助无障碍树读取 Turnstile iframe 内真实 checkbox 的视口坐标。
+ * iframe 往往藏在 closed shadow root，页面 DOM 看不到它，但 frame tree/AX tree 仍可见。
+ */
+async function readDetachedCheckboxPoint(page, timeoutMs = 1200) {
+  const deadline = Date.now() + timeoutMs
+  const frames = typeof page.frames === 'function'
+    ? page.frames().filter(frame => /challenges\.cloudflare\.com|turnstile/i.test(String(frame.url?.() || '')))
+    : []
+  for (const frame of frames) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) break
+    let owner = null
+    try {
+      let ownerBox = null
+      if (typeof frame?.frameElement === 'function') {
+        owner = await withTimeout(frame.frameElement(), Math.min(700, remaining), '定位 Turnstile iframe 超时')
+        ownerBox = owner
+          ? await withTimeout(owner.boundingBox(), Math.min(700, Math.max(1, deadline - Date.now())), '读取 Turnstile iframe 坐标超时')
+          : null
+      } else {
+        ownerBox = await legacyFrameOwnerBox(page, frame, {
+          timeoutMs: Math.min(700, Math.max(1, deadline - Date.now()))
+        })
+      }
+      if (!ownerBox || ownerBox.width < 200 || ownerBox.height < 50) continue
+      const ready = await turnstileCheckboxPoint(page, frame, ownerBox, {
+        timeoutMs: Math.min(700, Math.max(1, deadline - Date.now()))
+      })
+      if (ready?.point) {
+        return {
+          source: 'ax-checkbox',
+          x: Math.round(ownerBox.x),
+          y: Math.round(ownerBox.y),
+          width: Math.round(ownerBox.width),
+          height: Math.round(ownerBox.height),
+          point: {
+            x: Math.round(ready.point.x),
+            y: Math.round(ready.point.y)
+          }
+        }
+      }
+    } catch {
+      // iframe/AX 树在重建时会短暂失效，交给下一轮轮询或 holder 回退
+    } finally {
+      try { await owner?.dispose?.() } catch { /* frame 可能已经重建 */ }
+    }
+  }
+  return null
+}
+
+/**
  * 断开状态下的失败几乎没有可观测性：主进程没接管页面，也没人在窗口前看着。
  * 超时收尾时重连 CDP 留一份现场（这时挑战已经废了，attach 不再有副作用）：
  * 页面自治脚本的步骤日志、Turnstile 组件的实际位置、token 是否签发、指针最终落点，
  * 再存一张截图。远端用户只要把这几行日志发回来就能定性。
+ * @param {object} diagnostic 本轮原生点击尝试与最后一次系统指针落点
  */
-export async function dumpDetachedFailure(ws, host, display) {
+export async function dumpDetachedFailure(ws, host, display, diagnostic = {}) {
   let browser = null
   try {
     const puppeteer = await getPuppeteer()
@@ -1820,25 +1991,35 @@ export async function dumpDetachedFailure(ws, host, display) {
 
     const snapshot = await withTimeout(page.evaluate(() => {
       const state = window.__relayCheckin
-      const iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]')
-      const rect = iframe?.getBoundingClientRect()
+      const holder = document.getElementById('relay-checkin-turnstile-holder')
+      const iframe = [...(holder?.querySelectorAll('iframe') || [])].find(item => {
+        try { return /challenges\.cloudflare\.com|turnstile/i.test(item.src || '') } catch { return false }
+      })
+      const node = iframe || holder
+      const rect = node?.getBoundingClientRect()
       const input = document.querySelector('input[name="cf-turnstile-response"]')
       return {
         round: state?.round ?? null,
         steps: (state?.log || []).map(item => (item.code ? `${item.step}(${item.code})` : item.step)),
         title: document.title,
         iframe: rect
-          ? `${Math.round(rect.width)}x${Math.round(rect.height)} @视口(${Math.round(rect.x)},${Math.round(rect.y)})`
+          ? `${iframe ? 'iframe' : 'holder'} ${Math.round(rect.width)}x${Math.round(rect.height)} @视口(${Math.round(rect.x)},${Math.round(rect.y)})`
           : '未渲染',
         tokenLen: input?.value?.length || 0
       }
     }), 15000, '读取验证现场超时')
 
     const mouse = await nativeMouseLocation(display)
+    const lastClick = diagnostic.lastClick
+    const clickSummary = lastClick
+      ? `｜点击尝试=${diagnostic.clickAttempts || 0}｜最后点击=${lastClick.clicked ? '命令成功' : '命令失败'}`
+        + ` 目标=(${lastClick.x}, ${lastClick.y})｜落点=${lastClick.pointer || '未知'}`
+      : `｜点击尝试=${diagnostic.clickAttempts || 0}｜最后点击=无`
     logger.warn(`[relay-checkin-plugin] ${host} 验证现场: 挑战轮次=${snapshot.round}`
       + `｜页面步骤=[${snapshot.steps.join(' → ') || '无'}]`
       + `｜Turnstile 组件=${snapshot.iframe}｜token 长度=${snapshot.tokenLen}`
-      + `｜指针停在=${mouse || '未知'}｜标题=${snapshot.title}`)
+      + `｜指针停在=${mouse || '未知'}｜标题=${snapshot.title}${clickSummary}`
+      + `｜内核=${await withTimeout(browser.version(), 10000, '读取内核版本超时').catch(() => '未知')}`)
 
     const dir = path.join(dataPath(), 'turnstile-debug')
     fs.mkdirSync(dir, { recursive: true })
@@ -2038,8 +2219,11 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
     const browser = await launchDetachedBrowser(puppeteer, launchOptions, { host, executablePath })
     chromeProc = browser.process()
     ws = browser.wsEndpoint()
+    // 断开 CDP 之后就问不到版本了，趁 attach 状态先把内核结论固定下来
+    await noteBrowserKernel(browser, executablePath)
 
     let geom = null
+    let widget = null
     try {
       const page = await newPageSafe(browser, 30000, { reuseBlank: true })
       if (proxy?.auth) await withTimeout(page.authenticate(proxy.auth), 15000, '设置代理认证超时')
@@ -2056,6 +2240,7 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
         maxRetries: 2
       }), 15000, '注入验证脚本超时')
       await navigateForTurnstile(page, account.baseUrl)
+      widget = await readDetachedWidget(page)
       geom = await withTimeout(page.evaluate(() => ({
         screenX: window.screenX,
         screenY: window.screenY,
@@ -2071,10 +2256,20 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
       try { browser.disconnect() } catch { /* 已断开 */ }
     }
 
-    const viewX = DETACHED_WIDGET.left + DETACHED_WIDGET.boxX
-    const viewY = DETACHED_WIDGET.top + DETACHED_WIDGET.boxY
+    const widgetBox = widget || {
+      source: 'fixed-fallback',
+      x: DETACHED_WIDGET.left,
+      y: DETACHED_WIDGET.top,
+      width: DETACHED_WIDGET.width,
+      height: DETACHED_WIDGET.height
+    }
+    const { x: viewX, y: viewY } = detachedWidgetClickPoint(widgetBox)
     // 断开 CDP 后再问系统要窗口几何：这是唯一不依赖 Chrome 自报数据的坐标来源
-    const windowGeom = await nativeWindowGeometry(pointerDisplay, `relay-checkin ${host}`)
+    const windowGeom = await nativeWindowGeometry(
+      pointerDisplay,
+      `relay-checkin ${host}`,
+      { pid: chromeProc?.pid }
+    )
     const origin = detachedClickOrigin(geom, windowGeom)
     const [boxX, boxY] = origin
       ? [origin.x + viewX, origin.y + viewY]
@@ -2086,12 +2281,15 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
       logger.info(`[relay-checkin-plugin] 复选框屏幕坐标 (${boxX}, ${boxY})｜`
         + `显示环境: ${describePointerEnv(display, pointerDisplay)}｜`
         + `依据: ${origin ? `系统实测窗口 ${windowGeom.width}x${windowGeom.height} @(${windowGeom.x},${windowGeom.y})` : '页面自报（系统未给出窗口几何）'}｜`
+        + `组件: ${widgetBox.source} ${widgetBox.width}x${widgetBox.height} @视口(${widgetBox.x},${widgetBox.y})｜`
         + `页面 inner ${geom?.innerWidth}x${geom?.innerHeight} outer ${geom?.outerWidth}x${geom?.outerHeight}`)
     }
 
     const deadline = Date.now() + timeoutSec * 1000
     let clickedRound = 0
     let round = 1
+    let clickAttempts = 0
+    let lastClick = null
     let firstProbe = true
     let probeMisses = 0
     let reportedProgress = false
@@ -2100,9 +2298,16 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
         // 组件渲染完还要「像人一样」停一会儿再点：立刻点击本身就是行为特征。
         // 首轮还要留出 api.js 加载 + render 的时间，点在未就绪的组件上会直接判失败。
         await waitMs((clickedRound === 0 ? 6000 : 3500) + Math.floor(Math.random() * 3000))
-        if (await nativeClick(pointerDisplay, boxX, boxY, { windowId: windowGeom?.windowId })) {
+        const clicked = await nativeClick(pointerDisplay, boxX, boxY, { windowId: windowGeom?.windowId })
+        clickAttempts++
+        const pointer = await nativeMouseLocation(pointerDisplay)
+        lastClick = { clicked, x: boxX, y: boxY, pointer }
+        const clickDetail = `目标=(${boxX}, ${boxY})｜指针=${pointer || '未知'}｜窗口=${windowGeom?.windowId || '未定位'}｜组件=${widgetBox.source}`
+        if (clicked) {
           clickedRound = round
-          logger.info(`[relay-checkin-plugin] 已用系统指针点击 ${host} 的验证复选框（第 ${round} 次挑战）`)
+          logger.mark(`[relay-checkin-plugin] 已执行系统指针点击 ${host} 的验证复选框（第 ${round} 次挑战，${clickDetail}）`)
+        } else {
+          logger.warn(`[relay-checkin-plugin] 系统指针点击 ${host} 失败（第 ${round} 次尝试，${clickDetail}）`)
         }
       }
       // 探测要重连 CDP，attach 本身会让正在进行的挑战被判 bot，所以第一次探测
@@ -2126,11 +2331,11 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
         // 一次都没读到过、又连续失败一分钟：窗口或注入脚本已经废了，
         // 没必要把剩下的超时耗完（探测失败说明没连上，不存在打断挑战的风险）
         if (!reportedProgress && probeMisses >= 10) {
-          await dumpDetachedFailure(ws, host, pointerDisplay)
+          await dumpDetachedFailure(ws, host, pointerDisplay, { clickAttempts, lastClick })
           return {
             turnstileFailed: true,
             message: '无法与人机验证窗口通信（浏览器窗口异常退出或注入脚本未生效）',
-            detail: { stage: 'detached', reason: 'probe-unreachable', probeMisses }
+            detail: { stage: 'detached', reason: 'probe-unreachable', probeMisses, clickAttempts }
           }
         }
       } else if (!reportedProgress) {
@@ -2140,11 +2345,13 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
       }
       if (state?.round) round = state.round
     }
-    await dumpDetachedFailure(ws, host, pointerDisplay)
+    await dumpDetachedFailure(ws, host, pointerDisplay, { clickAttempts, lastClick })
     return {
       turnstileFailed: true,
-      message: `Turnstile 在 ${timeoutSec} 秒内未完成${autoClick ? '' : '，请在机器人运行设备弹出的浏览器窗口中完成验证'}`,
-      detail: { stage: 'detached', reason: 'timeout' }
+      message: staleKernelNotice
+        ? STALE_KERNEL_MESSAGE
+        : `Turnstile 在 ${timeoutSec} 秒内未完成${autoClick ? '' : '，请在机器人运行设备弹出的浏览器窗口中完成验证'}`,
+      detail: { stage: 'detached', reason: 'timeout', clickAttempts }
     }
   } finally {
     if (ws || chromeProc) await closeDetachedBrowser(ws, chromeProc)

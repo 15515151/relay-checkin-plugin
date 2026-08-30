@@ -3,6 +3,7 @@
  * 运行：node test/smoke.mjs（在插件根目录）
  */
 import assert from 'node:assert'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -82,7 +83,8 @@ try {
     resolveBrowserExecutable,
     newPageSafe,
     turnstileBrowserMode,
-    browserExecutableVersion
+    browserExecutableVersion,
+    staleTurnstileKernel
   } = await import('../models/browser.js')
   assert.equal(
     browserPoolKey({ proxyServer: '', profileKey: 'ioll.pp.ua' }),
@@ -130,6 +132,24 @@ try {
       return { stdout: '151.0.4129.59\r\n', stderr: '', status: 0 }
     }
   }), '151.0.4129.59', '应正确读取 Windows 浏览器文件版本')
+  assert.equal(
+    staleTurnstileKernel('Chrome/152.0.7977.64'),
+    '',
+    '新版内核不应被判成过旧'
+  )
+  assert.ok(
+    staleTurnstileKernel('HeadlessChrome/101.0.4950.0', true).includes('101.0.4950.0'),
+    'Puppeteer 自带的旧 Chromium 必须给出带版本号的过旧结论'
+  )
+  assert.ok(
+    staleTurnstileKernel('HeadlessChrome/101.0.4950.0', true).includes('Puppeteer 自带'),
+    '使用自带内核时的提示要点明升级办法不同于系统浏览器'
+  )
+  assert.equal(
+    staleTurnstileKernel(''),
+    '',
+    '读不到版本时不应误报过旧，避免掩盖真实失败原因'
+  )
   let createdExtraPage = false
   const initialBlank = { url: () => 'about:blank' }
   assert.equal(await newPageSafe({
@@ -379,10 +399,13 @@ try {
     parseShellGeometry,
     parsePointerLocation,
     pointerPath,
+    nativeClick,
+    nativePointerUnavailable,
+    xdotoolWindowSearchArgs,
     windowsClickCommand,
     windowsWindowGeometryCommand
   } = await import('../models/native.js')
-  const { detachedClickOrigin } = await import('../models/browser.js')
+  const { detachedClickOrigin, detachedWidgetClickPoint } = await import('../models/browser.js')
 
   assert.equal(pointerDisplayFor(':99'), ':99', '自建虚拟屏优先')
   assert.equal(
@@ -396,6 +419,36 @@ try {
   )
   assert.equal(pointerDisplayFor(null, { platform: 'linux', env: {} }), '', '无桌面且无虚拟屏只能手动点')
   assert.equal(pointerDisplayFor(null, { platform: 'darwin', env: {} }), '', 'macOS 没有可用的原生指针工具')
+  assert.deepEqual(
+    xdotoolWindowSearchArgs('relay-checkin tabitoken.com', 12345),
+    [
+      ['search', '--onlyvisible', '--pid', '12345', '.', 'getwindowgeometry', '--shell'],
+      ['search', '--onlyvisible', '--name', 'relay-checkin tabitoken.com', 'getwindowgeometry', '--shell']
+    ],
+    '窗口标题可能被站点覆盖时应先按 Chrome PID 查询，再回退标题'
+  )
+  assert.deepEqual(
+    detachedWidgetClickPoint({ x: 240, y: 300, width: 300, height: 65 }),
+    { x: 262, y: 332 },
+    'Turnstile 复选框应按实际 widget 矩形计算中心坐标'
+  )
+  assert.deepEqual(
+    detachedWidgetClickPoint({ x: 240, y: 300, width: 300, height: 72, point: { x: 258, y: 334 } }),
+    { x: 258, y: 334 },
+    '无障碍树取得精确 checkbox 坐标时应优先使用，不再套固定偏移'
+  )
+
+  // Linux 上 xdotool 可能在 Yunzai 已启动后才安装；一次 ENOENT 不应让后续轮次永久退化为手动。
+  if (process.platform === 'linux' && !spawnSync('xdotool', ['-h'], { stdio: 'ignore' }).error) {
+    const savedPath = process.env.PATH
+    try {
+      process.env.PATH = '/definitely-missing'
+      await nativeClick(':99', 1, 1)
+    } finally {
+      process.env.PATH = savedPath
+    }
+    assert.equal(nativePointerUnavailable(), false, 'xdotool 恢复后应重新启用原生指针')
+  }
 
   // Windows 的命令行会给含空格的路径加引号，分隔符与大小写也都不固定
   const winProfile = 'C:\\Users\\Bot 1\\Yunzai\\data\\browser-profile\\abc123'
@@ -496,6 +549,9 @@ try {
     geometryScript.includes('GetClientRect') && geometryScript.includes('ClientToScreen'),
     'Windows 侧要返回客户区矩形的屏幕坐标'
   )
+  const pidGeometryScript = windowsWindowGeometryCommand('title may change', 65552)
+  assert.ok(pidGeometryScript.includes('Get-Process -Id 65552'), 'Windows 站点覆盖标题时应按 Chrome PID 找窗口')
+  assert.doesNotMatch(pidGeometryScript, /MainWindowTitle -like/, '按 PID 查询时不应再依赖窗口标题')
 
   // Windows 返回客户区（frameW≈0，frameH=标签栏+地址栏）；Linux 返回窗口外框（左右各半边框）
   assert.deepEqual(
@@ -588,6 +644,63 @@ try {
     { quota: 1000000, usedQuota: 100000 },
     { quota: 1200000, usedQuota: 400000 }
   ), 500000, '奖励推导应抵消签到期间的正常消费')
+
+  // 非 JSON 响应的诊断只保留响应形状，不能把查询参数或正文写进日志。
+  const { request: commonRequest } = await import('../models/adapters/common.js')
+  const savedFetch = global.fetch
+  const savedWarn = global.logger.warn
+  const savedAllowedPrivateHosts = cfg.security.allowedPrivateHosts
+  const diagnostics = []
+  global.logger.warn = (...args) => diagnostics.push(args.join(' '))
+  cfg.security.allowedPrivateHosts = ['x.com']
+  global.fetch = async () => ({
+    status: 200,
+    text: async () => '<html><title>Cloudflare</title></html>',
+    headers: { get: name => name.toLowerCase() === 'content-type' ? 'text/html; charset=utf-8' : null }
+  })
+  try {
+    const nonJson = await commonRequest('https://x.com/api/checkin?secret=do-not-log', { method: 'POST' })
+    assert.equal(nonJson.json, null)
+    assert.match(diagnostics[0], /POST \/api\/checkin 返回非 JSON：HTTP 200/)
+    assert.match(diagnostics[0], /Content-Type=text\/html; charset=utf-8.*类型=html,cloudflare/)
+    assert.doesNotMatch(diagnostics[0], /do-not-log|<html|Cloudflare/)
+
+    diagnostics.length = 0
+    global.fetch = async () => { throw new Error('mock network failure') }
+    await assert.rejects(
+      commonRequest('https://x.com/api/checkin?secret=do-not-log', { method: 'GET', maxRetry: 0 }),
+      /GET 请求失败/
+    )
+    assert.match(diagnostics[0], /GET \/api\/checkin 请求失败/)
+    assert.doesNotMatch(diagnostics[0], /do-not-log/)
+  } finally {
+    global.fetch = savedFetch
+    global.logger.warn = savedWarn
+    cfg.security.allowedPrivateHosts = savedAllowedPrivateHosts
+  }
+
+  // 阿里云 WAF 拦截页也是 HTTP 200 + text/html，必须能与「站点响应异常」区分开
+  const { isAliyunWafPage } = await import('../models/adapters/common.js')
+  const WAF_SNIPPET = '<!doctype html>\n<meta charset="UTF-8">\n'
+    + '<meta name="aliyun_waf_aa" content="ff926c7f07e45e2e487a29a6197d3460">'
+  assert.equal(isAliyunWafPage({ status: 200, json: null, textSnippet: WAF_SNIPPET }), true,
+    '带 aliyun_waf_* 埋点的 200 拦截页必须识别为 WAF')
+  assert.equal(isAliyunWafPage({ status: 200, json: null, textSnippet: '<html><body>Access Verification</body></html>' }), true,
+    '滑块验证页的英文标题同样要认出来')
+  assert.equal(isAliyunWafPage({ status: 200, json: { success: true }, textSnippet: WAF_SNIPPET }), false,
+    '拿到 JSON 就说明已穿过 WAF，不能再判成拦截')
+  assert.equal(isAliyunWafPage({ status: 502, json: null, textSnippet: '<html>bad gateway</html>' }), false,
+    '普通 HTML 错误页不是 WAF 拦截')
+
+  const { loginError } = await import('../models/adapters/agentrouter.js')
+  assert.match(
+    loginError(200, null, { status: 200, json: null, textSnippet: WAF_SNIPPET }),
+    /滑动验证/,
+    'WAF 拦截时要说明站点开启了滑动验证，而不是「登录响应异常」'
+  )
+  assert.match(loginError(200, null, { status: 200, json: null, textSnippet: '' }), /登录响应异常/,
+    '非 WAF 的异常响应仍保留原提示')
+  assert.match(loginError(401, null), /邮箱或密码无效/, '凭据错误的提示不受影响')
   console.log('adapters/common OK')
 
   // ---- adapters/index ----
