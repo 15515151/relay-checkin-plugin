@@ -50,9 +50,9 @@ async function captchaFallback(account, adapter, checkinPath = adapter.checkinPa
     const image = cap.json?.data?.captcha_image
     if (!cap.json?.success || !captchaId || !image) {
       const msg = cap.json?.message || `HTTP ${cap.status}`
-      const hint = /请打开网站/.test(String(msg)) ? '，这站签到只认网页会话，改用 #中转添加cookie 地址 session值 用户ID 绑一下吧' : ''
+      const hint = /请打开网站/.test(String(msg)) ? '（该站签到接口只认网页会话，请改用 #中转添加cookie 地址 session值 用户ID 绑定）' : ''
       logger.warn(`[relay-checkin-plugin] ${account.name} 获取验证码失败：${msg}`)
-      return { ok: false, already: false, validation: 'captcha', msg: `拿不到验证码呀${hint}` }
+      return { ok: false, already: false, validation: 'captcha', msg: `获取验证码失败：${msg}${hint}` }
     }
 
     let answer = ''
@@ -60,10 +60,10 @@ async function captchaFallback(account, adapter, checkinPath = adapter.checkinPa
       answer = await ocrCaptcha(Buffer.from(image.replace(/^data:image\/\w+;base64,/, ''), 'base64'))
     } catch (err) {
       logger.warn(`[relay-checkin-plugin] ${account.name} 验证码识别异常：${err?.message || err}`)
-      return { ok: false, already: false, validation: 'captcha', msg: '验证码认不出来呀，让主人看下日志哦' }
+      return { ok: false, already: false, validation: 'captcha', msg: `验证码识别失败：${err?.message || err}` }
     }
     if (!answer) {
-      lastMsg = '这张验证码嘟嘟没看清'
+      lastMsg = '验证码识别结果为空'
       continue
     }
     logger.warn(`[relay-checkin-plugin] ${account.name} 验证码识别：${answer}（第 ${attempt} 次）`)
@@ -81,7 +81,7 @@ async function captchaFallback(account, adapter, checkinPath = adapter.checkinPa
     lastMsg = parsed.msg
     // 答错：站点侧验证码已作废，换新码重试
   }
-  return { ok: false, already: false, validation: 'captcha', msg: `验证码试了 ${maxAttempts} 次都没对呀：${lastMsg}` }
+  return { ok: false, already: false, validation: 'captcha', msg: `验证码自动识别未通过（已重试 ${maxAttempts} 次）：${lastMsg}` }
 }
 
 /**
@@ -99,7 +99,7 @@ async function turnstileFallback(account, adapter, checkinPath = adapter.checkin
     // 取不到 site key 走下方统一失败
   }
   if (!siteKey) {
-    return { ok: false, already: false, msg: '这站要过人机验证，可嘟嘟找不到验证组件呀' }
+    return { ok: false, already: false, msg: '站点要求人机验证但无法获取 site key，无法自动签到' }
   }
 
   const res = await turnstileCheckin(account, {
@@ -109,11 +109,11 @@ async function turnstileFallback(account, adapter, checkinPath = adapter.checkin
     siteKey
   })
   if (res.turnstileFailed) {
-    return { ok: false, already: false, msg: res.message || '人机验证没过去呀' }
+    return { ok: false, already: false, msg: res.message || 'Turnstile 挑战未通过（站点可能要求交互验证）' }
   }
   const parsed = parseCheckinResult(res.status, res.json, res)
   if (!parsed.ok && parsed.validation === 'turnstile') {
-    parsed.msg = `${parsed.msg}（嘟嘟用浏览器又试了一次，这站可能得手动点验证）`
+    parsed.msg = `${parsed.msg}（浏览器方案已重试，站点可能要求交互式验证）`
   }
   return parsed
 }
@@ -129,7 +129,7 @@ async function powFallback(account, adapter, checkinPath = adapter.checkinPath) 
     validationHeaders: adapter.buildValidationHeaders?.(account) || headers
   })
   if (res.powFailed) {
-    return { ok: false, already: false, uncertain: Boolean(res.uncertain), validation: 'pow', msg: res.message || '站点的安全验证没做完呀' }
+    return { ok: false, already: false, uncertain: Boolean(res.uncertain), validation: 'pow', msg: res.message || 'POW 安全验证未完成' }
   }
   return parseCheckinResult(res.status, res.json, res)
 }
@@ -206,8 +206,7 @@ export async function checkinAccount(account) {
           try {
             r = await captchaFallback(account, adapter, browserCheckinPath)
           } catch (err) {
-            logger.warn(`[relay-checkin-plugin] ${account.name} 验证码方案失败：${err?.message || err}`)
-            r = { ok: false, already: false, validation: 'captcha', msg: '验证码这条路走不通呀，让主人看下日志哦' }
+            r = { ok: false, already: false, validation: 'captcha', msg: `验证码方案失败：${err?.message || err}` }
           }
         } else if (!r.ok && browserCheckinPath && getConfig().browser.enable && (validation || needsBrowser(r.msg))) {
           if (validation === 'pow' || /安全验证|pow[_ -]?shield|proof.?of.?work/i.test(r.msg || '')) {
@@ -215,8 +214,7 @@ export async function checkinAccount(account) {
             try {
               r = await powFallback(account, adapter, browserCheckinPath)
             } catch (err) {
-              logger.warn(`[relay-checkin-plugin] ${account.name} POW 浏览器方案失败：${err?.message || err}`)
-              r = { ok: false, already: false, validation: 'pow', msg: '安全验证这条路走不通呀，让主人看下日志哦' }
+              r = { ok: false, already: false, validation: 'pow', msg: `POW 浏览器方案失败：${err?.message || err}` }
             }
           } else if (validation === 'turnstile' || (!validation && needsBrowser(r.msg))) {
             logger.info(`[relay-checkin-plugin] ${account.name} 需人机验证，尝试浏览器方案`)
@@ -246,7 +244,7 @@ export async function checkinAccount(account) {
           if (r.awardText == null) r.awardText = afterStatus.awardText ?? null
         }
       } else if (r.uncertain && afterStatus?.ok && !afterStatus.checked) {
-        r.msg = `${r.msg}；复查了一下还是没签上呀`
+        r.msg = `${r.msg}；状态复核仍为未签到`
       }
     }
   } catch (err) {
@@ -272,25 +270,6 @@ export async function checkinAccount(account) {
 }
 
 /**
- * 用户可见文案的最后一道关。
- *
- * 站点抛出的原始异常（fetch failed / HTTP 5xx / 类型错误）对用户毫无意义，统一换成人话。
- * 只能放在这一层：上游的 r.msg 还要参与 classifyValidation / needsBrowser 的关键词判断，
- * 提前替换会让「站点要求人机验证」这类自动降级失效。真实原因都已写进日志。
- */
-function friendlyMsg(msg) {
-  const text = String(msg || '')
-  if (!text) return ''
-  if (/请求超时|timeout|aborted/i.test(text)) return '站点太慢啦，等下再试呀~'
-  if (/fetch failed|ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|certificate|socket/i.test(text)) {
-    return '连不上这个站呀，检查下网络哦'
-  }
-  if (/请求失败|HTTP \d{3}/i.test(text)) return '站点没好好回话呀，晚点再试试~'
-  if (/TypeError|ReferenceError|Cannot read|undefined is not/i.test(text)) return '出了点小岔子，让主人看下日志哦'
-  return text
-}
-
-/**
  * 把适配器结果整理成统一展示行，并更新账号运行状态。
  * AgentRouter 邮箱登录响应的 quota 可能是 0 占位值；登录后会用新 Session
  * 再查一次 /api/user/self，不能把登录响应余额直接用于结果图。
@@ -307,7 +286,7 @@ export function finalizeCheckinResult(account, r, { beforeInfo = null, afterInfo
   if (r?.ok) {
     result.status = r.confirmed === false ? 'unknown' : (r.already ? 'already' : 'ok')
     result.statusText = r.statusTextOverride || STATUS_TEXT[result.status]
-    result.msg = friendlyMsg(r.msg)
+    result.msg = r.msg || ''
     // Sub2API 等站点的奖励本身就是美元金额，由适配器直接给出文本，不走 quota 换算
     const value = r.awardText ?? (r.awardQuota != null ? (quotaToUsd(r.awardQuota) ?? r.awardQuota) : null)
     if (value != null) {
@@ -316,7 +295,7 @@ export function finalizeCheckinResult(account, r, { beforeInfo = null, afterInfo
   } else {
     result.status = 'fail'
     result.statusText = STATUS_TEXT.fail
-    result.msg = friendlyMsg(r?.msg) || '没签上呀'
+    result.msg = r?.msg || '签到失败'
   }
 
   // 缓存运行时状态供 #中转列表 展示（由调用方批量落盘）
@@ -407,13 +386,12 @@ export async function queryEntry(entry) {
       } else {
         row.status = 'fail'
         row.statusText = '查询失败'
-        row.msg = friendlyMsg(info.msg)
+        row.msg = info.msg
       }
     } catch (err) {
-      logger.warn(`[relay-checkin-plugin] ${account.name} 余额查询异常: ${err?.message || err}`)
       row.status = 'fail'
       row.statusText = '查询失败'
-      row.msg = friendlyMsg(err.message)
+      row.msg = err.message
     }
     results.push(row)
   }

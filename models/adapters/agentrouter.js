@@ -32,7 +32,7 @@ const adapter = {
 
   async login(account) {
     if (!hasEmailLogin(account)) {
-      return { ok: false, already: false, msg: '这个账号没存邮箱和站内密码呀，重新绑一下吧' }
+      return { ok: false, already: false, msg: '缺少 AgentRouter 邮箱或站内密码' }
     }
 
     // 不携带旧 session，直接执行一次全新的邮箱登录。
@@ -82,7 +82,7 @@ const adapter = {
       ok: true,
       already: false,
       confirmed: false,
-      msg: '登录成功啦，但站点没说签到有没有算上呀',
+      msg: '邮箱登录成功，但响应缺少 checked_in 字段，无法确认是否发放签到额度',
       statusTextOverride: '登录成功·签到未确认'
     }
   },
@@ -91,12 +91,12 @@ const adapter = {
     if (hasEmailLogin(account)) return await this.login(account)
 
     const info = await this.userInfo(account)
-    if (!info.ok) return { ok: false, already: false, msg: info.msg || 'Session 不好用了呀，重新绑一下吧' }
+    if (!info.ok) return { ok: false, already: false, msg: info.msg || 'Session 验证失败' }
     return {
       ok: true,
       already: false,
       confirmed: false,
-      msg: 'Cookie 只能看余额，今天的 $25 领没领嘟嘟说不准呀（用 #中转添加邮箱 绑定才能自动领）',
+      msg: 'Session 只能查询余额，未执行邮箱重新登录，无法确认今日 $25 签到',
       statusTextOverride: 'Session 有效·未重登',
       balanceText: info.balanceText,
       info

@@ -944,14 +944,14 @@ export async function powCheckin(account, { checkinPath, headers = {}, validatio
         if (!challengeData?.enabled) {
           return {
             powFailed: true,
-            message: '站点的安全验证没给出题目呀，晚点再试试~',
+            message: challengeData ? '站点未返回可用的 POW 挑战参数' : (challengeResult.json?.message || `获取安全验证挑战失败 (HTTP ${challengeResult.status})`),
             detail: challengeResult
           }
         }
         const challenge = textOf(challengeData.challenge)
         const difficulty = Number(challengeData.difficulty)
         if (!challenge || !Number.isInteger(difficulty) || difficulty < 1 || difficulty > 8) {
-          return { powFailed: true, message: '站点的安全验证题目嘟嘟看不懂呀，晚点再试试~', detail: challengeResult }
+          return { powFailed: true, message: '站点返回的 POW 挑战参数无效', detail: challengeResult }
         }
 
         const automation = automationSignals()
@@ -961,7 +961,7 @@ export async function powCheckin(account, { checkinPath, headers = {}, validatio
         if (behavior.score < 30) risk += 30
         risk = Math.min(100, risk)
         if (risk >= 70) {
-          return { powFailed: true, message: '站点不认这个浏览器环境呀，晚点再试试~', detail: { risk, automation } }
+          return { powFailed: true, message: '浏览器环境风险过高，站点拒绝 POW 验证', detail: { risk, automation } }
         }
 
         const prefix = '0'.repeat(difficulty)
@@ -970,7 +970,7 @@ export async function powCheckin(account, { checkinPath, headers = {}, validatio
         let nonce = 0
         let hash = ''
         while (!hash) {
-          if (Date.now() >= deadline) return { powFailed: true, message: '安全验证算太久啦，晚点再试试~' }
+          if (Date.now() >= deadline) return { powFailed: true, message: `POW 计算超过 ${timeoutMs / 1000} 秒` }
           const hashes = await Promise.all(Array.from({ length: batchSize }, (_, offset) => hashText(challenge + (nonce + offset))))
           const hit = hashes.findIndex(value => value.startsWith(prefix))
           if (hit >= 0) {
@@ -1699,23 +1699,19 @@ function detachedTurnstilePageScript(cfg) {
   else start()
 }
 
-/**
- * 用户可见的过码失败原因：只说「怎么了 + 能怎么办」，
- * 错误码、超时秒数、无头/可见这些排障信息一律留在日志里。
- */
-function turnstileFailureMessage(result, interactive = false) {
+function turnstileFailureMessage(result, timeoutSec, interactive = false) {
   if (result?.reason === 'error-callback') {
     if (/^[36]\d{5}$/.test(result.errorCode || '')) {
-      return '站点的人机验证不放行呀，换个网络或者晚点再试~'
+      return `Turnstile 返回错误回调（错误码 ${result.errorCode}：Cloudflare 检测到浏览器或网络风险，请更新系统 Chrome/Edge 或更换网络）`
     }
-    return '站点的人机验证没通过呀，晚点再试试~'
+    return `Turnstile 返回错误回调${result.errorCode ? `（错误码 ${result.errorCode}）` : ''}`
   }
-  if (result?.stage === 'script') return '站点的人机验证没加载出来，晚点再试呀~'
-  if (result?.reason === 'render-error' || result?.reason === 'evaluate-error') return '人机验证出岔子啦，晚点再试呀~'
-  if (result?.reason === 'expired') return '验证过期啦，再来一次试试~'
+  if (result?.stage === 'script') return 'Turnstile 脚本未能正常加载或初始化'
+  if (result?.reason === 'render-error' || result?.reason === 'evaluate-error') return 'Turnstile 组件执行异常'
+  if (result?.reason === 'expired') return 'Turnstile token 在提交前已过期'
   return interactive
-    ? '人机验证没做完呀，要在机器人那台电脑上点一下哦'
-    : '人机验证没过去呀'
+    ? `Turnstile 在 ${timeoutSec} 秒内未完成，请在机器人运行设备弹出的浏览器窗口中完成验证`
+    : `Turnstile 在 ${timeoutSec} 秒内未签发 token（无头浏览器未获放行）`
 }
 
 const waitMs = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -1866,7 +1862,7 @@ function detachedResultToOutcome(result, timeoutSec) {
     return {
       turnstileFailed: true,
       message: turnstileFailureMessage(
-        { reason: 'error-callback', errorCode: result.turnstileError }, true
+        { reason: 'error-callback', errorCode: result.turnstileError }, timeoutSec, true
       ),
       detail: result
     }
@@ -1874,7 +1870,7 @@ function detachedResultToOutcome(result, timeoutSec) {
   if (!result.status) {
     return {
       turnstileFailed: true,
-      message: '验证过了但签到没发出去呀，晚点再试试~',
+      message: `验证已通过但签到请求发送失败：${result.error || '未知原因'}`,
       detail: result
     }
   }
@@ -2133,7 +2129,7 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
           await dumpDetachedFailure(ws, host, pointerDisplay)
           return {
             turnstileFailed: true,
-            message: '人机验证的窗口没了呀，晚点再试试~',
+            message: '无法与人机验证窗口通信（浏览器窗口异常退出或注入脚本未生效）',
             detail: { stage: 'detached', reason: 'probe-unreachable', probeMisses }
           }
         }
@@ -2147,7 +2143,7 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
     await dumpDetachedFailure(ws, host, pointerDisplay)
     return {
       turnstileFailed: true,
-      message: `人机验证没做完呀${autoClick ? '，晚点再试试~' : '，要在机器人那台电脑上点一下哦'}`,
+      message: `Turnstile 在 ${timeoutSec} 秒内未完成${autoClick ? '' : '，请在机器人运行设备弹出的浏览器窗口中完成验证'}`,
       detail: { stage: 'detached', reason: 'timeout' }
     }
   } finally {
@@ -2172,7 +2168,7 @@ async function runTurnstileAttempt(account, { checkinPath, headers, validationHe
     if (!attempt.token) {
       return {
         turnstileFailed: true,
-        message: turnstileFailureMessage(attempt, interactive),
+        message: turnstileFailureMessage(attempt, timeoutSec, interactive),
         detail: attempt
       }
     }
@@ -2249,7 +2245,7 @@ export async function turnstileCheckin(account, { checkinPath, headers, validati
         const fallbackDetail = fallbackErr?.message || String(fallbackErr)
         interactive = {
           turnstileFailed: true,
-          message: '浏览器起不来呀，晚点再试试~',
+          message: `无法启动或使用可见浏览器：${fallbackDetail}`,
           detail: { stage: 'interactive-browser', reason: 'exception', detail: fallbackDetail }
         }
       }
@@ -2276,7 +2272,7 @@ export async function turnstileCheckin(account, { checkinPath, headers, validati
     const detail = err?.message || String(err)
     quick = {
       turnstileFailed: true,
-      message: '浏览器起不来呀，晚点再试试~',
+      message: `无头浏览器阶段失败：${detail}`,
       detail: { stage: 'headless-browser', reason: 'exception', detail }
     }
   }
@@ -2288,7 +2284,7 @@ export async function turnstileCheckin(account, { checkinPath, headers, validati
   logger.info(`[relay-checkin-plugin] Turnstile 无头尝试未通过: ${quick.message}`)
   const result = {
     ...quick,
-    message: `${quick.message}（让主人在配置里打开「可见浏览器过 Turnstile」会好很多哦）`
+    message: `${quick.message}；可见浏览器接管已在配置中关闭`
   }
   noteResult(host, false)
   return result
@@ -2481,7 +2477,7 @@ async function ensureVirtualDisplay() {
 export async function sub2apiLogin(account, { siteKey = '', tokenOnly = false } = {}) {
   const cfg = getConfig()
   if (!cfg.browser.enable) {
-    return { ok: false, msg: '这站登录要过人机验证，可主人把浏览器方案关了呀~' }
+    return { ok: false, msg: '该站点登录需要人机验证，但配置中已关闭浏览器方案' }
   }
   const safeUrl = await assertSafeRequestUrl(account.baseUrl)
   const host = safeUrl.hostname
@@ -2582,7 +2578,7 @@ export async function sub2apiLogin(account, { siteKey = '', tokenOnly = false } 
     if (!turnstileToken) {
       noteResult(host, false)
       logger.warn(`[relay-checkin-plugin] Sub2API 人机验证未通过（已等待 ${usedSec} 秒）`)
-      return { ok: false, msg: '这站的人机验证没过去呀，它成功率本来就不稳，过一会儿再试试~' }
+      return { ok: false, msg: `人机验证未通过（等待 ${usedSec} 秒）：该站点验证成功率不稳定，可稍后重试` }
     }
     logger.info(`[relay-checkin-plugin] Sub2API 人机验证已签发 token（${usedSec} 秒）`)
 
@@ -2623,7 +2619,7 @@ export async function sub2apiLogin(account, { siteKey = '', tokenOnly = false } 
       noteResult(host, false)
       const msg = body?.message || body?.msg || login.error || `HTTP ${login.status}`
       if (body?.requires_2fa || data?.requires_2fa) {
-        return { ok: false, msg: '这个账号开了两步验证，嘟嘟登不进去呀' }
+        return { ok: false, msg: '该账号开启了两步验证（2FA），插件无法自动登录' }
       }
       return { ok: false, msg: `登录失败：${msg}` }
     }

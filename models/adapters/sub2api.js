@@ -80,7 +80,7 @@ async function ensureToken(account, { forceRenew = false, allowBrowser = true } 
 
   // 2) 浏览器过码重新登录
   if (!allowBrowser) {
-    return { ok: false, msg: '凭据过期啦，发 #中转签到 让嘟嘟重新登一下吧' }
+    return { ok: false, msg: '凭据已过期，需重新登录（本次查询不启动浏览器，请执行 #中转签到 重新登录）' }
   }
   if (!hasLogin(account)) {
     // 刷新令牌绑定的账号没有密码可用，必须让用户重新取一次
@@ -111,7 +111,7 @@ async function ensureToken(account, { forceRenew = false, allowBrowser = true } 
  * 站点每次都会轮换 refresh_token 并立刻作废旧值，所以换到就必须写回 account。
  */
 async function renewByRefreshToken(account) {
-  if (!account.token) return { ok: false, msg: '没有能用的刷新令牌呀' }
+  if (!account.token) return { ok: false, msg: '没有可用的刷新令牌' }
   const res = await request(apiUrl(account, '/auth/refresh'), {
     method: 'POST',
     body: { refresh_token: account.token }
@@ -281,11 +281,11 @@ export function parseSub2apiCheckin(res) {
     return { ok: false, already: false, validation: 'turnstile', msg: msg || '签到要求人机验证' }
   }
   if (res.status === 401 || res.status === 403) {
-    return { ok: false, already: false, msg: '凭据不好用了呀，重新绑一下吧' }
+    return { ok: false, already: false, msg: `凭据无效或已过期 (HTTP ${res.status})` }
   }
   if (!ok) {
     if (/already|已签/i.test(msg)) return { ok: true, already: true, confirmed: true, msg: '今日已签到' }
-    return { ok: false, already: false, msg: msg || '没签上呀，晚点再试试~' }
+    return { ok: false, already: false, msg: msg || `签到失败 (HTTP ${res.status})` }
   }
   const already = data?.already_checked_in === true
   return {
