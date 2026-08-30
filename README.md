@@ -5,24 +5,18 @@
 支持 **new-api、Veloera 及同源魔改站、AnyRouter、AgentRouter、Sub2API**，站点类型自动识别。
 宿主支持 **TRSS-Yunzai**（OneBot v11）与 **[Yunzai NG](https://github.com/Yunzai-NG/yunzai-ng)**。
 
-> **本仓库是 Fork**，上游：[Cat-bl/relay-checkin-plugin](https://github.com/Cat-bl/relay-checkin-plugin)。
-> 两个镜像同步更新：[GitHub](https://github.com/cchanlan/relay-checkin-plugin) ·
-> [GitCode](https://gitcode.com/ccxhan/relay-checkin-plugin)（国内更快）
-
-所有 `#中转xxx` 都兼容 `#中转站xxx` 写法。
+> **本仓库是 Fork**，上游 [Cat-bl/relay-checkin-plugin](https://github.com/Cat-bl/relay-checkin-plugin)；
+> 两个镜像同步更新：[GitHub](https://github.com/cchanlan/relay-checkin-plugin) · [GitCode](https://gitcode.com/ccxhan/relay-checkin-plugin)（国内更快）
 
 ## 相对上游新增
 
-- 同一份代码兼容 Yunzai NG（宿主依赖收进 `host/` 适配层，指令逻辑不动）
-- 新增 **Sub2API** 站点：自动识别、邮箱密码或 refresh_token 绑定、过期走纯 HTTP 续期不开浏览器
-- 新增 `#中转添加刷新令牌`：本机过不去码的站点可直接用浏览器抓的 token 绑定
+- 同一份代码兼容 Yunzai NG（宿主依赖收进 `host/` 适配层）
+- 新增 **Sub2API** 站点与 `#中转添加刷新令牌`：邮箱密码或 refresh_token 绑定，续期不开浏览器
+- **Turnstile 改为断开调试连接后由页面自治过码**（CDP 连着必被判自动化），三个平台都能自动勾选：
+  Windows 走 user32 真实指针，有桌面的用本机指针，无桌面 Linux 自动拉 Xvfb + xdotool
 - **图形验证码自动识别**（ddddocr），答错自动换码重试
-- **Turnstile 改为断开调试连接后由页面自治过码** —— 实测 CDP 会话连着就必被判自动化
-- **三个平台都能自动勾选**：Windows 走 PowerShell + user32 真实指针，有桌面的机器用本机指针，
-  无桌面 Linux 自动拉 Xvfb + xdotool
-- 失败留档（页内步骤日志、组件位置、指针落点、截图）并直接定性：内核过旧、出口 IP 被风控、
-  站点挂了 WAF 各有各的提示，不再一律「过码失败」
-- 浏览器档案占用自愈、锅巴配置面板、new-api 网页会话（`authMode: session`）支持
+- 过码失败定性到具体原因（内核过旧 / 出口 IP 被风控 / 站点挂 WAF）并留档截图
+- 浏览器档案占用自愈、锅巴配置面板、new-api 网页会话（`authMode: session`）
 
 ## 安装
 
@@ -47,14 +41,12 @@ git clone --depth=1 https://gitcode.com/ccxhan/relay-checkin-plugin ./plugins/re
 | Windows 10 / 11 | 无需安装 | 用系统自带 PowerShell 调 user32 指针。要在**已登录的桌面会话**里跑 Yunzai，装成 Windows 服务会起不来浏览器 |
 | macOS | — | 没有免安装的指针工具，需要自己在弹出的窗口里点一下 |
 
-还必须有一个较新的 Chrome / Edge：Turnstile 会拒绝过旧内核，而 Puppeteer 自带的 Chromium
-往往是数年前的构建（实测 Chromium 101 点完复选框只回 `600010`，换 Chrome 152 立刻签发 token）。
-装好后插件自动选版本最高的那个，也可以用 `browser.executablePath` 指定。
+还必须有较新的 Chrome / Edge：Turnstile 拒绝过旧内核，而 Puppeteer 自带的 Chromium 往往是数年前的
+构建（实测 Chromium 101 点完只回 `600010`，换 Chrome 152 立刻签发 token）。装好后插件自动选版本最高
+的那个，也可用 `browser.executablePath` 指定。Debian / Ubuntu 服务器：
 
 ```bash
-# Debian / Ubuntu 服务器
-curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb
-apt install -y /tmp/chrome.deb
+curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb && apt install -y /tmp/chrome.deb
 ```
 
 ### 图形验证码（可选）
@@ -67,12 +59,9 @@ python3 -m venv .venv && .venv/bin/python -m pip install ddddocr   # Linux / mac
 py -m venv .venv && .venv\Scripts\pip install ddddocr              # Windows
 ```
 
-Python 3.14 上 `python3 -m venv` 建完可能没有 `pip`（自带的旧版 pip 与 3.14 不兼容）。
-装了 [uv](https://github.com/astral-sh/uv) 就换个 3.13 环境：
-
-```bash
-uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python ddddocr
-```
+Python 3.14 上 `venv` 建完可能没有 `pip`（自带的旧版 pip 与 3.14 不兼容），装了
+[uv](https://github.com/astral-sh/uv) 就换 3.13 环境：
+`uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python ddddocr`
 
 ### 装在 Yunzai NG 上
 
@@ -103,8 +92,8 @@ NG 侧另有面板配置与 `ctx.cron` 定时（改 cron 立即生效），出�
 #中转帮助  #中转插件更新
 ```
 
-同一站点可绑多个账号（按站点用户 ID 区分）；添加成功会自动签一次。
-群里发含令牌的指令会自动尝试撤回，列表图里令牌打码。
+同一站点可绑多个账号（按站点用户 ID 区分）；添加成功会自动签一次。所有 `#中转xxx` 都兼容
+`#中转站xxx` 写法。群里发含令牌的指令会自动尝试撤回，列表图里令牌打码。
 
 ## 配置
 
@@ -122,10 +111,9 @@ NG 侧另有面板配置与 `ctx.cron` 定时（改 cron 立即生效），出�
 
 ## 已知限制
 
+- 过不去的码只能换出口：机房 IP 常被判高风险（凭据照常签发、站点侧一律不通过，手动点也一样），
+  整站挂滑动验证（如阿里云 WAF）的站点纯 HTTP 与浏览器都过不去 —— 两者都要 `proxy.url` 配非机房出口
 - Turnstile 升级到人工挑战时仍需接管，插件会把截图发出来
-- 机房 IP 常被站点判高风险：Cloudflare 照常发凭据、站点侧却一律不通过，手动点也一样，
-  这种只能在 `proxy.url` 配一个非数据中心出口
-- 整站挂了滑动验证（如阿里云 WAF）的站点，纯 HTTP 和本机浏览器都过不去，同样要换出口
 - AnyRouter 等纯浏览器站的余额走缓存，不是每次实时刷
 - 一次性 refresh_token 轮换后立刻落盘，但若同时手动操作可能撞车，重绑即可
 - 上游与本 fork 都不保证站点接口稳定，站点改版可能需要跟进
