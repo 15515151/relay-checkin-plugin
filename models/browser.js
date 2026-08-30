@@ -218,7 +218,7 @@ const TURNSTILE_MIN_MAJOR = 120
 let staleKernelNotice = ''
 
 // 内核过旧时统一的用户可见结论：排障细节留在日志里，这里只说能怎么办
-const STALE_KERNEL_MESSAGE = '过码浏览器内核过旧，请在机器人运行设备安装新版 Chrome/Edge 后重试'
+const STALE_KERNEL_MESSAGE = '机器人设备上的浏览器版本太旧，过不了人机验证，请主人装个新版 Chrome 后重试'
 
 /**
  * 解析内核版本串并判断能否用于 Turnstile。
@@ -1769,18 +1769,19 @@ function detachedTurnstilePageScript(cfg) {
 function turnstileFailureMessage(result, timeoutSec, interactive = false) {
   // 内核过旧时不管失败在哪一步都是同一个结论，直接给出可执行的办法
   if (staleKernelNotice) return STALE_KERNEL_MESSAGE
+  // 具体错误码、失败阶段、超时秒数一律只进日志：用户能做的动作只有换出口或等下一轮
   if (result?.reason === 'error-callback') {
     if (/^[36]\d{5}$/.test(result.errorCode || '')) {
-      return `Turnstile 返回错误回调（错误码 ${result.errorCode}：Cloudflare 检测到浏览器或网络风险，请更新系统 Chrome/Edge 或更换网络）`
+      return '人机验证没通过：这台机器的网络出口被站点判成风险，请主人在配置里设置 proxy.url 换个出口后重试'
     }
-    return `Turnstile 返回错误回调${result.errorCode ? `（错误码 ${result.errorCode}）` : ''}`
+    return '人机验证没通过，稍后再试'
   }
-  if (result?.stage === 'script') return 'Turnstile 脚本未能正常加载或初始化'
-  if (result?.reason === 'render-error' || result?.reason === 'evaluate-error') return 'Turnstile 组件执行异常'
-  if (result?.reason === 'expired') return 'Turnstile token 在提交前已过期'
+  if (result?.stage === 'script') return '人机验证组件加载不出来，可能是网络不通，稍后再试'
+  if (result?.reason === 'render-error' || result?.reason === 'evaluate-error') return '人机验证出了点问题，已知问题，稍后重试'
+  if (result?.reason === 'expired') return '人机验证超时失效了，稍后再试'
   return interactive
-    ? `Turnstile 在 ${timeoutSec} 秒内未完成，请在机器人运行设备弹出的浏览器窗口中完成验证`
-    : `Turnstile 在 ${timeoutSec} 秒内未签发 token（无头浏览器未获放行）`
+    ? '人机验证没做完，要在机器人那台设备弹出的窗口里点一下'
+    : '人机验证没通过，稍后再试'
 }
 
 const waitMs = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -2234,7 +2235,7 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
           await dumpDetachedFailure(ws, host, pointerDisplay, { clickAttempts, lastClick })
           return {
             turnstileFailed: true,
-            message: '无法与人机验证窗口通信（浏览器窗口异常退出或注入脚本未生效）',
+            message: '人机验证的窗口没了，稍后再试',
             detail: { stage: 'detached', reason: 'probe-unreachable', probeMisses, clickAttempts }
           }
         }
@@ -2250,7 +2251,7 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
       turnstileFailed: true,
       message: staleKernelNotice
         ? STALE_KERNEL_MESSAGE
-        : `Turnstile 在 ${timeoutSec} 秒内未完成${autoClick ? '' : '，请在机器人运行设备弹出的浏览器窗口中完成验证'}`,
+        : `人机验证没做完${autoClick ? '，稍后再试' : '，要在机器人那台设备弹出的窗口里点一下'}`,
       detail: { stage: 'detached', reason: 'timeout', clickAttempts }
     }
   } finally {
@@ -2377,9 +2378,11 @@ export async function turnstileCheckin(account, { checkinPath, headers, validati
     )
   } catch (err) {
     const detail = err?.message || String(err)
+    // 这条会被后面的可见浏览器结果覆盖；真流到用户面前时，异常细节留在日志里就够了
+    logger.warn(`[relay-checkin-plugin] ${host} 无头过码阶段异常: ${detail}`)
     quick = {
       turnstileFailed: true,
-      message: `无头浏览器阶段失败：${detail}`,
+      message: '人机验证没走完，稍后再试',
       detail: { stage: 'headless-browser', reason: 'exception', detail }
     }
   }

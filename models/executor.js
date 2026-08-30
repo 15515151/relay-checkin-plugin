@@ -121,7 +121,7 @@ async function turnstileFallback(account, adapter, checkinPath = adapter.checkin
     logger.warn(`[relay-checkin-plugin] ${account.name} 已提交 Turnstile 凭据但站点判定失败`
       + `（HTTP ${res.status}${detail ? `｜${detail}` : ''}）：多半是本机出口 IP 被判成高风险，`
       + '在 proxy.url 配置一个非数据中心出口后重试即可；站点的 site key 与 secret 不配对也是同样表现')
-    parsed.msg = `${parsed.msg}（已提交验证凭据但站点未通过，请检查出口 IP 或配置 proxy.url）`
+    parsed.msg = `${parsed.msg}（验证过了但站点没认，多半是网络出口被判风险，请主人设置 proxy.url 后重试）`
   }
   return parsed
 }
@@ -237,6 +237,12 @@ export async function checkinAccount(account) {
       if (afterStatus?.ok && afterStatus.checked) {
         const changedThisRun = beforeStatus?.ok && beforeStatus.checked === false
         if (!r.ok || r.already) {
+          // 前面报过错却复核到已签，必须留一行：否则日志里只剩那条过码失败的 warn，
+          // 而出图写着「状态复核成功」，排查的人会以为两边有一个在骗自己。
+          if (!r.ok) {
+            logger.info(`[relay-checkin-plugin] ${account.name} 签到请求报「${r.msg || '未知原因'}」，`
+              + `但站点状态显示${changedThisRun ? '本次已签到成功' : '今日早已签到'}，按成功处理`)
+          }
           r = {
             ok: true,
             already: !changedThisRun,
@@ -264,6 +270,8 @@ export async function checkinAccount(account) {
   if (!r?.ok && r?.uncertain && adapter.reconcileByBalance) {
     const awardQuota = deriveAwardQuota(beforeInfo, afterInfo)
     if (awardQuota != null) {
+      logger.info(`[relay-checkin-plugin] ${account.name} 签到请求报「${r.msg || '未知原因'}」，`
+        + '但余额比签到前增加了，按成功处理')
       r = {
         ok: true,
         already: false,
@@ -275,6 +283,15 @@ export async function checkinAccount(account) {
     }
   }
   return finalizeCheckinResult(account, r, { beforeInfo, afterInfo })
+}
+
+/**
+ * 成功行的批注是不是只在复述状态列。只认纯状态词，带了额外内容（奖励明细、
+ * 「但缺少 xx 字段」这类提醒）的一律保留。
+ */
+function restatesStatus(msg) {
+  const text = String(msg || '').replace(/[\s。！!、,，.]/g, '')
+  return !text || /^(签到)?成功$|^今日已签到?$|^已签到$|^ok$|^success$/i.test(text)
 }
 
 /**
@@ -294,7 +311,8 @@ export function finalizeCheckinResult(account, r, { beforeInfo = null, afterInfo
   if (r?.ok) {
     result.status = r.confirmed === false ? 'unknown' : (r.already ? 'already' : 'ok')
     result.statusText = r.statusTextOverride || STATUS_TEXT[result.status]
-    result.msg = r.msg || ''
+    // 站点的 message 常常就是「签到成功」，与状态列一字不差，再占一行批注纯属噪音
+    result.msg = restatesStatus(r.msg) ? '' : (r.msg || '')
     // Sub2API 等站点的奖励本身就是美元金额，由适配器直接给出文本，不走 quota 换算
     const value = r.awardText ?? (r.awardQuota != null ? (quotaToUsd(r.awardQuota) ?? r.awardQuota) : null)
     if (value != null) {
