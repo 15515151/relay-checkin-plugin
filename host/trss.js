@@ -105,8 +105,10 @@ export function createTrssHost() {
         tplFile: path.join(TPL_PATH, `${tplName}.html`),
         pluResPath: path.join(PLUGIN_PATH, 'resources') + path.sep,
         saveId: `${tplName}_${renderSeq}`,
-        // TRSS-Yunzai 默认 JPEG 90，模板里小字密集，先出无损图再交给 QQ 压
-        imgType: 'png',
+        // 模板里小字密集：webp 体积只有 png 的几分之一，又没有 jpeg 那种糊边
+        // （imgType 由渲染器直接透传给 puppeteer 的 screenshot({type})）
+        imgType: 'webp',
+        quality: 90,
         ...data
       })
     }
