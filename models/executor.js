@@ -341,6 +341,24 @@ export function finalizeCheckinResult(account, r, { beforeInfo = null, afterInfo
   if (afterInfo?.balanceText) result.balance = afterInfo.balanceText
   else if (r?.balanceText) result.balance = r.balanceText
 
+  // 有些站点（AgentRouter）没有签到状态接口，登录响应又恒报「已签到」，
+  // 于是重复执行时会一次次报同一笔奖励。这类适配器用 verifyByBalance 声明
+  // 「我的成功结论要用余额复核」：涨了才算本次新签，没涨就是今天早已签过。
+  if (r?.ok && !r.already && r.verifyByBalance) {
+    const gained = deriveAwardQuota(beforeInfo, afterInfo)
+    const comparable = beforeInfo?.ok === true && afterInfo?.ok === true
+    if (gained != null) {
+      r.awardQuota = gained
+    } else if (comparable) {
+      r.already = true
+      r.statusTextOverride = '今日已签（余额未变）'
+      r.awardQuota = null
+    } else if (r.awardQuota == null) {
+      // 前后余额有一端查不到，无法判断；退回站点公告里的名义奖励
+      r.awardQuota = r.awardQuotaFallback ?? null
+    }
+  }
+
   if (r?.ok && !r.already && r.awardQuota == null) {
     r.awardQuota = deriveAwardQuota(beforeInfo, afterInfo)
   }

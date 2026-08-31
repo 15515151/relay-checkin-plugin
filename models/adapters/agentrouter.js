@@ -73,7 +73,11 @@ const adapter = {
         ok: true,
         already: false,
         confirmed: true,
-        awardQuota: await readLoginAwardQuota(account),
+        // 该站每次登录都会把 checked_in 报成 true，无论今天是否已经领过，
+        // 所以「签到成功」不能只信它：交由执行器用前后余额复核，没涨就是今天已签过
+        verifyByBalance: true,
+        // 站点不告知实际到账金额；公告里的名义值只在拿不到前后余额时兜底
+        awardQuotaFallback: await readLoginAwardQuota(account),
         statusTextOverride: '邮箱登录签到成功'
       }
     }
