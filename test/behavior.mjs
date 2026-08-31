@@ -591,7 +591,7 @@ try {
     assert.doesNotMatch(source, /transform:\s*scale\s*\(/, `${file} 不应使用需要运行时配合的 CSS scale`)
   }
   // 出图参数在宿主适配层里（TRSS 走 Yunzai 的 lib/puppeteer，NG 走插件自带渲染）
-  assert.match(fs.readFileSync(path.join(ROOT, 'host', 'trss.js'), 'utf8'), /imgType:\s*'png'/, 'TRSS 模板截图应使用无损 PNG')
+  assert.match(fs.readFileSync(path.join(ROOT, 'host', 'trss.js'), 'utf8'), /imgType:\s*'webp'/, 'TRSS 模板截图应使用 webp')
   assert.match(fs.readFileSync(path.join(ROOT, 'ng', 'render.js'), 'utf8'), /type:\s*'png'/, 'NG 模板截图应使用无损 PNG')
   console.log('模板渲染 OK')
 
