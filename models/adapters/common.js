@@ -228,6 +228,23 @@ export function isAliyunWafPage(response) {
 }
 
 /**
+ * Cloudflare 防火墙的整站拦截页（Error 1020 一类）：HTTP 403 + text/html，
+ * 标题是「Attention Required! | Cloudflare」、正文写「Sorry, you have been blocked」。
+ *
+ * 必须与 5 秒盾/Turnstile 挑战页分开：挑战页真实浏览器能过，这种按出口 IP、ASN 或地区
+ * 下的封禁页真实浏览器也过不去（实测同一台机器直连 403、换代理出口后首页与 /api/* 全部 200），
+ * 所以不能拉起浏览器白等一轮，只能提示换出口。
+ * 注意这种页面里同样带 challenge-platform 脚本，不能凭它判成「可过码」。
+ * @param {{json?: object|null, textSnippet?: string, status?: number}} response request() 的返回值
+ */
+export function isCloudflareBlockPage(response) {
+  if (response?.json != null) return false
+  const snippet = String(response?.textSnippet || '')
+  if (!snippet) return false
+  return /Attention Required!?\s*\|\s*Cloudflare|you have been blocked|cf-error-details|Error\s*10(?:0[0-9]|1[0-9]|2[0-9])\b/i.test(snippet)
+}
+
+/**
  * new-api 系 quota 换算美元（500000 quota = $1），兼容字符串数字；
  * 缺失值（null/undefined/空串）返回 null 而非 $0.00
  */
@@ -267,6 +284,9 @@ export function classifyValidation(json, meta = {}) {
   const msg = json?.message || json?.msg || json?.error?.message || ''
   const code = json?.code || json?.error_code || json?.error?.code || ''
   const text = `${code} ${msg} ${meta.textSnippet || ''}`
+  // 出口被 Cloudflare 封禁的拦截页正文里同时带 cloudflare / challenge-platform 字样，
+  // 会被下面的 waf、turnstile 两档吃掉，所以先按页面结构判掉。
+  if (isCloudflareBlockPage({ json, textSnippet: meta.textSnippet })) return 'cfBlock'
   if (/pow[_ -]?shield|pow[_ -]?(?:captcha|token)|verification_required|verification_expired|verification_invalid|需要完成安全验证|安全验证|security verification|proof.?of.?work/i.test(text)) {
     return 'pow'
   }
@@ -296,7 +316,8 @@ export function parseCheckinResult(status, json, meta = {}) {
       turnstile: '站点开启了 Turnstile 人机验证，无法直接签到',
       pow: '站点要求完成安全验证（POW），无法直接签到',
       captcha: '站点要求完成验证码/人机验证，无法直接签到',
-      waf: '请求被站点 WAF/人机验证拦截'
+      waf: '请求被站点 WAF/人机验证拦截',
+      cfBlock: '站点拦下了机器人所在的网络出口，请主人配置 proxy.url 后重试'
     }[validation]
     return { ok: false, already: false, validation, msg: validationMessage }
   }

@@ -85,6 +85,26 @@ async function captchaFallback(account, adapter, checkinPath = adapter.checkinPa
 }
 
 /**
+ * Turnstile site key 是站点常量，但 /api/status 会被站点的防护层连带拦掉。
+ * 取到过一次就记住（内存 + 账号字段落盘），别让一次拦截把签到路整条堵死。
+ */
+const siteKeyCache = new Map()
+
+function rememberSiteKey(account, siteKey) {
+  const host = new URL(account.baseUrl).hostname
+  siteKeyCache.set(host, siteKey)
+  if (account.turnstileSiteKey !== siteKey) {
+    account.turnstileSiteKey = siteKey
+    safePersist()
+  }
+}
+
+function recallSiteKey(account) {
+  const host = new URL(account.baseUrl).hostname
+  return siteKeyCache.get(host) || account.turnstileSiteKey || null
+}
+
+/**
  * Turnstile 站点浏览器降级签到：取 site key → 页面内过挑战 → 带 token 重调签到接口
  */
 async function turnstileFallback(account, adapter, checkinPath = adapter.checkinPath) {
@@ -97,6 +117,15 @@ async function turnstileFallback(account, adapter, checkinPath = adapter.checkin
     siteKey = json?.data?.turnstile_site_key || null
   } catch {
     // 取不到 site key 走下方统一失败
+  }
+  if (siteKey) {
+    rememberSiteKey(account, siteKey)
+  } else {
+    siteKey = recallSiteKey(account)
+    if (siteKey) {
+      logger.warn(`[relay-checkin-plugin] ${account.name} 的 /api/status 取不到 site key，`
+        + '改用上次记住的值继续验证')
+    }
   }
   if (!siteKey) {
     return { ok: false, already: false, msg: '站点要求人机验证但无法获取 site key，无法自动签到' }
@@ -224,7 +253,15 @@ export async function checkinAccount(account) {
             } catch (err) {
               r = { ok: false, already: false, validation: 'pow', msg: `POW 浏览器方案失败：${err?.message || err}` }
             }
-          } else if (validation === 'turnstile' || (!validation && needsBrowser(r.msg))) {
+          } else if (validation === 'cfBlock') {
+            // 出口被站点的 Cloudflare 防火墙规则封了，真实浏览器同样是那张拦截页，
+            // 开一轮浏览器只会白等到超时。保留 parseCheckinResult 给出的「配 proxy.url」提示。
+            logger.warn(`[relay-checkin-plugin] ${account.name} 的请求被 Cloudflare 按网络出口拦截，`
+              + '真实浏览器也过不去，已跳过浏览器方案；请在 proxy.url 配置代理并把该站域名加入 proxy.hosts')
+          } else {
+            // 其余需要人机交互的类型（turnstile、waf 等）统一交给浏览器：
+            // 这里以前只认 validation === 'turnstile'，于是 waf 一类既进不了浏览器、
+            // 又没有别的处理，直接落地成「请求被站点 WAF/人机验证拦截」的死路。
             logger.info(`[relay-checkin-plugin] ${account.name} 需人机验证，尝试浏览器方案`)
             r = await turnstileFallback(account, adapter, browserCheckinPath)
           }

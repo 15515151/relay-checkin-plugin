@@ -636,6 +636,19 @@ try {
   assert.equal(r.ok, true)
   r = parseCheckinResult(403, null, { textSnippet: '<title>Access Verification</title> aliyun_waf' })
   assert.match(r.msg, /WAF/)
+  // Cloudflare 按出口封禁的拦截页：真实浏览器也过不去，必须与可过码的挑战分开，
+  // 且不能被 waf / turnstile 两档吃掉（该页正文自带 challenge-platform 脚本）。
+  const CF_BLOCK_SNIPPET = '<head><title>Attention Required! | Cloudflare</title>'
+    + '<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script>'
+  assert.equal(classifyValidation(null, { textSnippet: CF_BLOCK_SNIPPET }), 'cfBlock')
+  r = parseCheckinResult(403, null, { textSnippet: CF_BLOCK_SNIPPET })
+  assert.equal(r.validation, 'cfBlock')
+  assert.match(r.msg, /网络出口.*proxy\.url/)
+  assert.equal(
+    classifyValidation({ success: false, message: 'Turnstile token 为空' }, { textSnippet: '' }),
+    'turnstile',
+    '有 JSON 业务提示时不应误判成出口封禁'
+  )
   r = parseCheckinResult(522, null)
   assert.match(r.msg, /源服务器无响应/)
   r = parseCheckinResult(0, null, { error: '请求超时（15 秒）' })
@@ -691,6 +704,22 @@ try {
     '拿到 JSON 就说明已穿过 WAF，不能再判成拦截')
   assert.equal(isAliyunWafPage({ status: 502, json: null, textSnippet: '<html>bad gateway</html>' }), false,
     '普通 HTML 错误页不是 WAF 拦截')
+
+  const { isCloudflareBlockPage } = await import('../models/adapters/common.js')
+  assert.equal(isCloudflareBlockPage({ status: 403, json: null, textSnippet: CF_BLOCK_SNIPPET }), true,
+    'Cloudflare 的整站拦截页要按标题认出来')
+  assert.equal(isCloudflareBlockPage({
+    status: 403,
+    json: null,
+    textSnippet: '<html><body>Sorry, you have been blocked</body></html>'
+  }), true, '拦截页正文那句 blocked 同样是判据')
+  assert.equal(isCloudflareBlockPage({
+    status: 503,
+    json: null,
+    textSnippet: '<title>Just a moment...</title><script src="/cdn-cgi/challenge-platform/x.js">'
+  }), false, '5 秒盾是可过码的挑战页，不能当成按出口封禁')
+  assert.equal(isCloudflareBlockPage({ status: 200, json: { success: true }, textSnippet: '' }), false,
+    '拿到 JSON 就说明没被拦')
 
   const { loginError } = await import('../models/adapters/agentrouter.js')
   assert.match(
