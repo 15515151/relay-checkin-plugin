@@ -1008,6 +1008,32 @@ try {
     const v = randInt(5, 15)
     assert.ok(v >= 5 && v <= 15)
   }
+  // ---- 降级决策：适配器已开过浏览器时不得再降级 ----
+  const { pickValidationFallback } = await import('../models/executor.js')
+  const pick = (r, validation, browserEnabled = true) =>
+    pickValidationFallback(r, { validation, browserEnabled, hasCheckinPath: true })
+  const fail = extra => ({ ok: false, msg: '站点要求人机验证', ...extra })
+
+  assert.equal(pick(fail(), 'turnstile'), 'turnstile', '普通过码失败仍应降级到浏览器')
+  assert.equal(
+    pick(fail({ browserTried: true }), 'turnstile'),
+    null,
+    '适配器已用浏览器试过时不得再降级，否则会用兜底文案覆盖真实原因'
+  )
+  assert.equal(pick(fail({ browserTried: true }), 'captcha'), null, '图形验证码分支同样受该标记约束')
+  assert.equal(pick(fail(), 'captcha'), 'captcha')
+  assert.equal(pick(fail({ msg: '需要完成安全验证' }), 'pow'), 'pow')
+  assert.equal(pick(fail(), 'cfBlock'), 'cfBlock', '出口被 Cloudflare 拦截时单独处理，不开浏览器')
+  assert.equal(pick(fail(), 'turnstile', false), null, '关掉浏览器方案时不降级')
+  assert.equal(pick({ ok: true }, 'turnstile'), null, '成功结果不参与降级')
+  assert.equal(
+    pickValidationFallback(fail(), { validation: 'turnstile', browserEnabled: true, hasCheckinPath: false }),
+    null,
+    '没有签到路径时无处降级'
+  )
+  assert.equal(pick({ ok: false, msg: '余额不足' }, ''), null, '与验证无关的失败不该开浏览器')
+  console.log('降级决策 OK')
+
   console.log('executor.randInt OK')
 
   // ---- 指令正则（与 apps/checkin.js 保持一致）----
