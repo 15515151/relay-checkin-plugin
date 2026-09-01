@@ -97,7 +97,12 @@ try {
   }
   let emailAccount = { ...EMAIL_AR }
   let r = await agentrouter.checkin(emailAccount)
-  assert.deepEqual([r.ok, r.already, r.awardQuota], [true, false, 12500000])
+  // 该站登录响应恒报 checked_in=true，适配器因此只声明「要用余额复核」，
+  // 并把公告里的名义奖励放进 awardQuotaFallback，不再直接当成本次到账
+  assert.deepEqual(
+    [r.ok, r.already, r.verifyByBalance, r.awardQuota, r.awardQuotaFallback],
+    [true, false, true, undefined, 12500000]
+  )
   assert.deepEqual(loginBody, { username: 'user@example.com', password: 'agentrouter-site-password' })
   assert.equal(loginCookieHeader, undefined, '重新登录请求不得携带旧 Session')
   assert.equal(emailAccount.token, 'NEW_SESSION', '应保存登录响应的新 Session')
@@ -111,17 +116,36 @@ try {
     selfCookies.push(opts.headers.Cookie)
     return {
       status: 200,
-      body: { success: true, data: { id: 7, quota: selfCalls === 1 ? 5000000 : 17500000, used_quota: 0 } }
+      body: { success: true, data: { id: 7, quota: selfCalls === 1 ? 5000000 : 16000000, used_quota: 0 } }
     }
   }
   emailAccount = { ...EMAIL_AR }
   const emailResult = await checkinAccount(emailAccount)
   assert.equal(emailResult.status, 'ok')
   assert.equal(emailResult.statusText, '邮箱登录签到成功')
-  assert.equal(emailResult.award, '+$25.00')
-  assert.equal(emailResult.balance, '$35.00')
+  assert.equal(emailResult.award, '+$22.00', '奖励应为签到前后的实测差额，而不是公告里的 $25')
+  assert.equal(emailResult.balance, '$32.00')
   assert.equal(selfCalls, 2, '邮箱登录后必须用新 Session 再查询一次真实余额')
   assert.deepEqual(selfCookies, ['session=S', 'session=NEW_SESSION'])
+
+  // 同一天重复执行：站点照样回 checked_in=true，但余额一分没涨。
+  // 这时必须按今日已签展示，否则会把同一笔奖励反复报一遍。
+  selfCalls = 0
+  routes['GET https://agentrouter.org/api/user/self'] = {
+    status: 200,
+    body: { success: true, data: { id: 7, quota: 16000000, used_quota: 0 } }
+  }
+  const emailRepeat = await checkinAccount({ ...EMAIL_AR })
+  assert.equal(emailRepeat.status, 'already', '余额未变说明今天已经签过')
+  assert.equal(emailRepeat.statusText, '今日已签（余额未变）')
+  assert.equal(emailRepeat.award, '', '重复执行不得再报一次奖励')
+  assert.equal(emailRepeat.balance, '$32.00')
+
+  // 查不到前后余额时无法判断，退回公告里的名义奖励，保持原有可用性
+  delete routes['GET https://agentrouter.org/api/user/self']
+  const emailNoInfo = await checkinAccount({ ...EMAIL_AR })
+  assert.equal(emailNoInfo.status, 'ok')
+  assert.equal(emailNoInfo.award, '+$25.00', '无法比对余额时退回公告名义值')
 
   // checked_in=false 表示本次登录未新增，按今日已签展示。
   routes = {
