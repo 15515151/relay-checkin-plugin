@@ -366,8 +366,9 @@ const adapter = {
     const res = await authed(account, shape.claimPath, { method: 'POST', body })
     if (res.authFailed) return { ok: false, already: false, msg: res.msg }
     const parsed = parseSub2apiCheckin(res)
-    // 这一轮已经用浏览器过过码了，提交仍失败时同样不该再降级
-    if (status.ok && status.turnstileRequired) parsed.browserTried = true
+    // 这一轮已经用浏览器过过码了，提交仍失败时同样不该再降级。
+    // 字段名跟着接口换代改成了 captchaRequired，别再写 turnstileRequired（恒 undefined）
+    if (status.ok && status.captchaRequired) parsed.browserTried = true
     return parsed
   },
 

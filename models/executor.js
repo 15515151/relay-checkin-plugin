@@ -48,6 +48,9 @@ export function pickValidationFallback(r, { validation, browserEnabled, hasCheck
   // 适配器自己已经开过浏览器过码（如 Sub2API）：再降级只会拿 new-api 风格的接口
   // 白试一轮，还会用兜底文案覆盖掉适配器给出的真实原因
   if (r.browserTried === true) return null
+  // 适配器点名了「这种验证方式插件还不会过」（如站点把签到验证换成 cap）：
+  // 降级同样是白试一轮，还会把这句真实原因盖掉
+  if (validation === 'unsupported') return null
   if (validation === 'captcha') return 'captcha'
   if (!browserEnabled) return null
   if (!validation && !needsBrowser(r.msg)) return null
