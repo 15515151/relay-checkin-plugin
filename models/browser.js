@@ -2580,11 +2580,16 @@ async function ensureVirtualDisplay() {
  * 过 Turnstile 并在同一页面内完成 Sub2API 登录。
  * token 由 Cloudflare 绑定当前浏览器上下文与出口网络，必须在同一页里立刻用掉。
  *
+ * action / cData 必须与站点签发挑战时声明的一致：新版签到把它们放在
+ * /checkin/attempt 的响应里（captcha_action / captcha_cdata），自渲染时漏掉
+ * 会让后端回 DAILY_CHECKIN_CAPTCHA_ACTION_MISMATCH——token 本身有效，只是绑定的动作对不上。
+ *
  * @param {object} account 需含 baseUrl；tokenOnly 为 false 时还需 loginEmail / password
- * @param {object} opts { siteKey: 仅 tokenOnly 时用于自渲染组件, tokenOnly: 只取 token 不登录 }
+ * @param {object} opts { siteKey: 自渲染组件用的 key, tokenOnly: 只取 token 不登录,
+ *                        action / cdata: 站点声明的挑战绑定信息 }
  * @returns {Promise<{ok: true, data?: object, turnstileToken?: string}|{ok: false, msg: string}>}
  */
-export async function sub2apiLogin(account, { siteKey = '', tokenOnly = false } = {}) {
+export async function sub2apiLogin(account, { siteKey = '', tokenOnly = false, action = '', cdata = '' } = {}) {
   const cfg = getConfig()
   if (!cfg.browser.enable) {
     return { ok: false, msg: '该站点登录需要人机验证，但配置中已关闭浏览器方案' }
@@ -2646,25 +2651,54 @@ export async function sub2apiLogin(account, { siteKey = '', tokenOnly = false } 
 
     const started = Date.now()
     const turnstileToken = await withTimeout(
-      page.evaluate(async ({ timeoutMs, siteKey }) => {
+      page.evaluate(async ({ timeoutMs, siteKey, siteWidgetWaitMs, action, cdata }) => {
         const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
         const deadline = Date.now() + timeoutMs
         const fromInput = () => document.querySelector('input[name="cf-turnstile-response"]')?.value || ''
-        // 首选站点自己渲染的组件：它带着站点配置的 action/cData，也最不容易被判风险
-        while (Date.now() < deadline) {
+        // 首选站点自己渲染的组件：它带着站点配置的 action/cData，也最不容易被判风险。
+        // 但拿到了 site key 就不能把整个预算都耗在这儿等：有的站点登录改用了 cap 之类
+        // 别的方案，这个 input 永远不会出现，傻等只会烧掉全部超时再无事可做。
+        const siteWidgetDeadline = siteKey
+          ? Math.min(deadline, Date.now() + siteWidgetWaitMs)
+          : deadline
+        while (Date.now() < siteWidgetDeadline) {
           const value = fromInput()
           if (value) return value
           await wait(500)
         }
-        // 站点页面没有组件（例如签到弹窗才渲染）时，用传入的 site key 自渲染兜底
-        if (!siteKey || !window.turnstile?.render) return ''
+        if (!siteKey) return ''
+
+        // 站点页面没有组件时用传入的 site key 自渲染兜底。注意登录页若不用 Turnstile
+        // 就不会加载它的脚本，window.turnstile 可能压根不存在，必须先注入再 render，
+        // 否则这里会直接返回空串，把「脚本没加载」伪装成「等了整个超时都没过码」。
+        if (!window.turnstile?.render) {
+          await new Promise(resolve => {
+            if (document.querySelector('script[data-relay-turnstile]')) return resolve()
+            const script = document.createElement('script')
+            script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
+            script.async = true
+            script.dataset.relayTurnstile = '1'
+            script.onload = resolve
+            script.onerror = resolve
+            document.head.appendChild(script)
+          })
+          const apiDeadline = Math.min(deadline, Date.now() + 15000)
+          while (Date.now() < apiDeadline && !window.turnstile?.render) await wait(100)
+        }
+        if (!window.turnstile?.render) return ''
+
         const el = document.createElement('div')
         document.body.appendChild(el)
+        // 剩多少预算就等多久，不再固定 30 秒：等站点组件已经花掉一部分时间了
+        const left = Math.max(5000, deadline - Date.now())
         return await new Promise(resolve => {
-          const timer = setTimeout(() => resolve(''), 30000)
+          const timer = setTimeout(() => resolve(''), left)
           try {
             window.turnstile.render(el, {
               sitekey: siteKey,
+              // 站点声明过 action / cData 时必须一并带上，否则后端比对不上
+              action: action || undefined,
+              cData: cdata || undefined,
               callback: token => {
                 clearTimeout(timer)
                 resolve(token)
@@ -2679,7 +2713,7 @@ export async function sub2apiLogin(account, { siteKey = '', tokenOnly = false } 
             resolve('')
           }
         })
-      }, { timeoutMs: timeoutSec * 1000, siteKey }),
+      }, { timeoutMs: timeoutSec * 1000, siteKey, siteWidgetWaitMs: 8000, action, cdata }),
       (timeoutSec + 40) * 1000,
       '等待人机验证无响应'
     )
