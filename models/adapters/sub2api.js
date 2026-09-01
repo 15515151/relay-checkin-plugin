@@ -242,7 +242,9 @@ const adapter = {
     if (status.ok && status.turnstileRequired) {
       const solved = await sub2apiLogin(account, { siteKey: status.siteKey, tokenOnly: true })
       if (!solved.ok) {
-        return { ok: false, already: false, validation: 'turnstile', msg: solved.msg }
+        // 已经开过浏览器了，别让执行器再降级去试 new-api 风格的过码：
+        // 那条路在这类站点上必然拿不到 site key，只会用兜底文案盖掉这里的真实原因
+        return { ok: false, already: false, validation: 'turnstile', browserTried: true, msg: solved.msg }
       }
       turnstileToken = solved.turnstileToken || ''
     }
@@ -252,7 +254,10 @@ const adapter = {
       body: { turnstile_token: turnstileToken }
     })
     if (res.authFailed) return { ok: false, already: false, msg: res.msg }
-    return parseSub2apiCheckin(res)
+    const parsed = parseSub2apiCheckin(res)
+    // 这一轮已经用浏览器过过码了，提交仍失败时同样不该再降级
+    if (status.ok && status.turnstileRequired) parsed.browserTried = true
+    return parsed
   },
 
   async login(account) {

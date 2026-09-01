@@ -34,6 +34,30 @@ function needsBrowser(msg) {
 }
 
 /**
+ * 决定失败结果要不要降级到别的验证方案，以及降级到哪一种。
+ *
+ * 抽成纯函数是为了能单测：三条降级分支要么开浏览器、要么打站点接口，测试里跑不动，
+ * 而「该不该降级」这个判断本身正是最容易出错的地方。
+ *
+ * @param {object} r 适配器返回的结果
+ * @param {string} validation 已归类的验证类型（turnstile / pow / captcha / cfBlock / waf ...）
+ * @returns {'captcha'|'pow'|'cfBlock'|'turnstile'|null} null 表示不降级，保留原结果与原文案
+ */
+export function pickValidationFallback(r, { validation, browserEnabled, hasCheckinPath }) {
+  if (!r || r.ok || !hasCheckinPath) return null
+  // 适配器自己已经开过浏览器过码（如 Sub2API）：再降级只会拿 new-api 风格的接口
+  // 白试一轮，还会用兜底文案覆盖掉适配器给出的真实原因
+  if (r.browserTried === true) return null
+  if (validation === 'captcha') return 'captcha'
+  if (!browserEnabled) return null
+  if (!validation && !needsBrowser(r.msg)) return null
+  if (validation === 'pow' || /安全验证|pow[_ -]?shield|proof.?of.?work/i.test(r.msg || '')) return 'pow'
+  if (validation === 'cfBlock') return 'cfBlock'
+  // 其余需要人机交互的类型统一交给浏览器
+  return 'turnstile'
+}
+
+/**
  * 图形验证码站点降级签到（NewAPI 魔改站常见流程）：
  * POST /api/user/checkin/captcha 取 captcha_id + 图片 → ddddocr 识别 → 带
  * captcha_id/captcha_answer 重新提交签到，答错自动换码重试。
@@ -238,22 +262,30 @@ export async function checkinAccount(account) {
         const validation = r?.validation || classifyValidation({ message: r?.msg })
         const browserCheckinPath = account.signPath || adapter.checkinPath
         // 图形验证码：不依赖浏览器，直接取码识别后重提签到
-        if (!r.ok && browserCheckinPath && validation === 'captcha') {
+        const fallback = pickValidationFallback(r, {
+          validation,
+          browserEnabled: getConfig().browser.enable,
+          hasCheckinPath: Boolean(browserCheckinPath)
+        })
+        if (!r.ok && r.browserTried === true) {
+          logger.info(`[relay-checkin-plugin] ${account.name} 适配器已用浏览器尝试过验证，跳过降级：${r.msg || '无原因'}`)
+        }
+        if (fallback === 'captcha') {
           logger.info(`[relay-checkin-plugin] ${account.name} 需图形验证码，尝试自动识别`)
           try {
             r = await captchaFallback(account, adapter, browserCheckinPath)
           } catch (err) {
             r = { ok: false, already: false, validation: 'captcha', msg: `验证码方案失败：${err?.message || err}` }
           }
-        } else if (!r.ok && browserCheckinPath && getConfig().browser.enable && (validation || needsBrowser(r.msg))) {
-          if (validation === 'pow' || /安全验证|pow[_ -]?shield|proof.?of.?work/i.test(r.msg || '')) {
+        } else if (fallback) {
+          if (fallback === 'pow') {
             logger.info(`[relay-checkin-plugin] ${account.name} 需 POW 安全验证，尝试浏览器方案`)
             try {
               r = await powFallback(account, adapter, browserCheckinPath)
             } catch (err) {
               r = { ok: false, already: false, validation: 'pow', msg: `POW 浏览器方案失败：${err?.message || err}` }
             }
-          } else if (validation === 'cfBlock') {
+          } else if (fallback === 'cfBlock') {
             // 出口被站点的 Cloudflare 防火墙规则封了，真实浏览器同样是那张拦截页，
             // 开一轮浏览器只会白等到超时。保留 parseCheckinResult 给出的「配 proxy.url」提示。
             logger.warn(`[relay-checkin-plugin] ${account.name} 的请求被 Cloudflare 按网络出口拦截，`
