@@ -43,6 +43,8 @@ security:
 browser:
   enable: true
   # 浏览器程序路径；留空时自动选择版本最高的系统 Chrome/Edge，找不到才使用 Puppeteer 自带 Chromium
+  # snap 版 Chromium（含 Ubuntu 转发脚本 /usr/bin/chromium-browser）会被跳过：它被 AppArmor
+  # 关在 $HOME/snap 内，读写不了本插件的浏览器档案目录，只会报 SingletonLock: Permission denied
   # Turnstile 要求浏览器保持较新，旧版 TRSS-Yunzai 建议显式填写最新版 Chrome 路径
   # Linux: /usr/bin/google-chrome    Windows: C:\Program Files\Google\Chrome\Application\chrome.exe
   executablePath: ""

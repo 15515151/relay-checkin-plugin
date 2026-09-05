@@ -137,7 +137,7 @@ const schemas = [
   input(
     'browser.executablePath',
     '浏览器路径',
-    '留空自动选择版本最高的系统 Chrome/Edge，找不到才用 Puppeteer 自带 Chromium。Turnstile 要求浏览器较新，旧版 TRSS-Yunzai 建议显式填最新版 Chrome 路径',
+    '留空自动选择版本最高的系统 Chrome/Edge（跳过 snap 版 Chromium，它读不到本插件的档案目录），找不到才用 Puppeteer 自带 Chromium。Turnstile 要求浏览器较新，旧版 TRSS-Yunzai 建议显式填最新版 Chrome 路径',
     process.platform === 'win32'
       ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
       : '/usr/bin/google-chrome'

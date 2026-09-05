@@ -84,6 +84,7 @@ try {
     newPageSafe,
     turnstileBrowserMode,
     browserExecutableVersion,
+    isSnapBrowser,
     staleTurnstileKernel
   } = await import('../models/browser.js')
   assert.equal(
@@ -124,6 +125,43 @@ try {
     exists: candidate => candidate === fakeChrome || candidate === fakeEdge,
     versionOf: candidate => candidate === fakeEdge ? '151.0.1.0' : '129.0.1.0'
   }), fakeEdge, 'Windows 应自动选择版本最高的系统 Chrome/Edge')
+  const snapPaths = new Set(['/usr/bin/chromium-browser', '/snap/bin/chromium'])
+  const linuxResolve = extra => resolveBrowserExecutable('', {
+    platform: 'linux',
+    exists: candidate => candidate === '/usr/bin/google-chrome' || snapPaths.has(candidate),
+    versionOf: candidate => snapPaths.has(candidate) ? '152.0.7977.64' : '150.0.7871.46',
+    isSnap: candidate => snapPaths.has(candidate),
+    ...extra
+  })
+  assert.equal(
+    linuxResolve(),
+    '/usr/bin/google-chrome',
+    'snap 版 Chromium 读不到本插件的档案目录，版本再高也要让位给 deb 版 Chrome'
+  )
+  assert.equal(
+    linuxResolve({ exists: candidate => snapPaths.has(candidate) }),
+    '/usr/bin/chromium-browser',
+    '系统上只有 snap 版时仍要返回它，总比完全没有浏览器好'
+  )
+  assert.ok(
+    isSnapBrowser('/snap/bin/chromium', { realpath: () => { throw new Error('ENOENT') }, readHead: () => '' }),
+    '/snap 下的路径应直接判定为 snap 版'
+  )
+  assert.ok(
+    isSnapBrowser('/usr/bin/chromium-browser', {
+      realpath: target => target,
+      readHead: () => '#!/bin/sh\nif ! [ -x /snap/bin/chromium ]; then\nexit 1\nfi\n'
+    }),
+    'Ubuntu 转发到 snap 的 /usr/bin/chromium-browser 脚本必须认出来'
+  )
+  assert.equal(
+    isSnapBrowser('/usr/bin/google-chrome', {
+      realpath: () => '/opt/google/chrome/google-chrome',
+      readHead: () => '\x7fELF\x02\x01\x01'
+    }),
+    false,
+    'deb 版 Chrome 不应被误判成 snap'
+  )
   assert.equal(browserExecutableVersion(fakeEdge, {
     platform: 'win32',
     spawn: (command, args) => {

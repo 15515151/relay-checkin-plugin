@@ -152,6 +152,43 @@ export function browserExecutableVersion(executablePath, {
   }
 }
 
+/**
+ * 读文件开头若干字节，用来判断它是二进制浏览器还是转发脚本（浏览器本体有几百 MB，不能整读）。
+ */
+function readFileHead(target, bytes = 4096) {
+  let fd = null
+  try {
+    fd = fs.openSync(target, 'r')
+    const buf = Buffer.alloc(bytes)
+    const read = fs.readSync(fd, buf, 0, bytes, 0)
+    return buf.subarray(0, read).toString('latin1')
+  } catch {
+    return ''
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd) } catch {}
+    }
+  }
+}
+
+/**
+ * 判断浏览器是否由 snap 分发。snap 版 Chromium 被 AppArmor 关在 $HOME/snap 之内，
+ * 读写不了本插件 data 目录下的浏览器档案，启动时只报
+ * `SingletonLock: Permission denied (13)`（此时 Chrome 甚至没说清是自己被限制了）。
+ * Ubuntu 的 /usr/bin/chromium-browser 就是一个转发到 /snap/bin/chromium 的 shell 脚本，
+ * 光看路径认不出来，所以还要看文件头。
+ */
+export function isSnapBrowser(executablePath, { readHead = readFileHead, realpath = fs.realpathSync } = {}) {
+  const target = String(executablePath || '')
+  if (!target) return false
+  if (target.startsWith('/snap/')) return true
+  try {
+    if (String(realpath(target)).startsWith('/snap/')) return true
+  } catch {}
+  const head = readHead(target)
+  return head.startsWith('#!') && (head.includes('/snap/bin/') || /\bsnap\s+run\b/.test(head))
+}
+
 function compareBrowserVersions(a, b) {
   const left = String(a || '').split('.').map(Number)
   const right = String(b || '').split('.').map(Number)
@@ -162,11 +199,23 @@ function compareBrowserVersions(a, b) {
   return 0
 }
 
+let warnedSnapBrowser = false
+
+function warnSnapBrowserOnce(executablePath) {
+  if (warnedSnapBrowser) return
+  warnedSnapBrowser = true
+  logger.warn(`[relay-checkin-plugin] 系统上只有 snap 版浏览器 ${executablePath}，`
+    + '它被 AppArmor 限制在 $HOME/snap 之内，读写不了本插件 data 目录下的浏览器档案，'
+    + '过码会以「SingletonLock: Permission denied」失败。'
+    + '请改用 deb 版 Chrome（apt install google-chrome-stable），或在配置项 browser.executablePath 中填写它的路径')
+}
+
 export function resolveBrowserExecutable(configured = '', {
   platform = process.platform,
   env = process.env,
   exists = fs.existsSync,
-  versionOf = executablePath => browserExecutableVersion(executablePath, { platform })
+  versionOf = executablePath => browserExecutableVersion(executablePath, { platform }),
+  isSnap = isSnapBrowser
 } = {}) {
   const explicit = String(configured || '').trim()
   if (explicit) {
@@ -199,11 +248,28 @@ export function resolveBrowserExecutable(configured = '', {
     )
   }
   const installed = [...new Set(candidates)].filter(candidate => exists(candidate))
-  if (installed.length <= 1) return installed[0] || null
-  return installed
-    .map((executablePath, index) => ({ executablePath, version: versionOf(executablePath), index }))
-    .sort((a, b) => compareBrowserVersions(b.version, a.version) || a.index - b.index)[0]
-    ?.executablePath || null
+  if (!installed.length) return null
+  // snap 只出现在上面的类 Unix 分支里，其它平台不必为此多读一次文件
+  const maySnap = platform !== 'win32' && platform !== 'darwin'
+  if (installed.length === 1) {
+    if (maySnap && isSnap(installed[0])) warnSnapBrowserOnce(installed[0])
+    return installed[0]
+  }
+  // snap 版排在最后：它版本往往更高，但读不到本插件的档案目录，用了必然失败，
+  // 只有系统上再没有别的浏览器时才退回它（并提示用户换 deb 版）
+  const picked = installed
+    .map((executablePath, index) => ({
+      executablePath,
+      snap: maySnap && isSnap(executablePath),
+      version: versionOf(executablePath),
+      index
+    }))
+    .sort((a, b) => Number(a.snap) - Number(b.snap)
+      || compareBrowserVersions(b.version, a.version)
+      || a.index - b.index)[0]
+  if (!picked) return null
+  if (picked.snap) warnSnapBrowserOnce(picked.executablePath)
+  return picked.executablePath
 }
 
 /**
@@ -2175,7 +2241,8 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
     const [boxX, boxY] = origin
       ? [origin.x + viewX, origin.y + viewY]
       : (geom ? viewportToScreen(geom, viewX, viewY) : [viewX, viewY])
-    const autoClick = Boolean(pointerDisplay) && !nativePointerUnavailable()
+    // 可变：指针工具是在第一次点击时才发现缺失的，发现后要能当场停掉自动点击
+    let autoClick = Boolean(pointerDisplay) && !nativePointerUnavailable()
     logger.info(`[relay-checkin-plugin] ${host} 已断开调试连接进入人机验证，`
       + `${autoClick ? '将自动勾选复选框' : '请在弹出的浏览器窗口中手动勾选'}（最多 ${timeoutSec} 秒）`)
     if (autoClick) {
@@ -2208,7 +2275,16 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
           clickedRound = round
           logger.mark(`[relay-checkin-plugin] 已执行系统指针点击 ${host} 的验证复选框（第 ${round} 次挑战，${clickDetail}）`)
         } else {
-          logger.warn(`[relay-checkin-plugin] 系统指针点击 ${host} 失败（第 ${round} 次尝试，${clickDetail}）`)
+          // 计数用 clickAttempts 而不是 round：挑战轮次只在点成功后才推进，
+          // 用它做「第 N 次尝试」会让连续重试全部显示成第 1 次，看着像卡住了
+          logger.warn(`[relay-checkin-plugin] 系统指针点击 ${host} 失败（第 ${clickAttempts} 次尝试，${clickDetail}）`)
+          // 缺 xdotool / PowerShell 是环境问题，等到超时也不会自己变好：
+          // 就地停掉自动点击改为等用户手动勾选，免得这条日志按探测间隔一直刷
+          if (nativePointerUnavailable()) {
+            autoClick = false
+            logger.warn(`[relay-checkin-plugin] 不再尝试自动勾选 ${host}，`
+              + '请在弹出的浏览器窗口中手动勾选复选框')
+          }
         }
       }
       // 探测要重连 CDP，attach 本身会让正在进行的挑战被判 bot，所以第一次探测
