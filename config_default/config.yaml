@@ -55,6 +55,8 @@ browser:
   # 是否在机器人运行设备上直接打开可见浏览器处理 Turnstile
   # 可见窗口使用独立持久档案，断开调试连接后由系统真实指针自动勾选复选框
   # Windows 和有桌面的机器直接用本机指针，无桌面 Linux 会自动拉起 Xvfb + xdotool；关闭后才使用无头模式
+  # 无桌面 Linux 必须先装好 xdotool（apt install xdotool）：虚拟屏里的窗口没人看得见，
+  # 缺了它谁也勾选不了，此时插件会直接跳过验证并提示安装，而不是白等一个超时
   turnstileInteractive: true
   # 等待可见浏览器完成 Turnstile 的最长时间（秒），范围 30~600
   turnstileInteractiveTimeoutSec: 120

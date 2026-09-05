@@ -439,11 +439,16 @@ try {
     pointerPath,
     nativeClick,
     nativePointerUnavailable,
+    needsVirtualDisplay,
     xdotoolWindowSearchArgs,
     windowsClickCommand,
     windowsWindowGeometryCommand
   } = await import('../models/native.js')
-  const { detachedClickOrigin, detachedWidgetClickPoint } = await import('../models/browser.js')
+  const {
+    detachedClickOrigin,
+    detachedWidgetClickPoint,
+    interactiveTakeoverBlockReason
+  } = await import('../models/browser.js')
 
   assert.equal(pointerDisplayFor(':99'), ':99', '自建虚拟屏优先')
   assert.equal(
@@ -457,6 +462,36 @@ try {
   )
   assert.equal(pointerDisplayFor(null, { platform: 'linux', env: {} }), '', '无桌面且无虚拟屏只能手动点')
   assert.equal(pointerDisplayFor(null, { platform: 'darwin', env: {} }), '', 'macOS 没有可用的原生指针工具')
+
+  // 窗口开在哪块屏上，决定了「缺 xdotool」是退回人工还是彻底走不通
+  assert.equal(needsVirtualDisplay({ platform: 'linux', env: {} }), true, '无桌面的 Linux 只能自建虚拟屏')
+  assert.equal(
+    needsVirtualDisplay({ platform: 'linux', env: { DISPLAY: ':0' } }), false,
+    '已有 X 桌面时窗口开在用户看得见的屏上'
+  )
+  assert.equal(
+    needsVirtualDisplay({ platform: 'linux', env: { WAYLAND_DISPLAY: 'wayland-0' } }), false,
+    'Wayland 桌面同样是用户看得见的屏'
+  )
+  assert.equal(needsVirtualDisplay({ platform: 'win32', env: {} }), false, 'Windows 不存在自建虚拟屏的情况')
+  const blockedReason = interactiveTakeoverBlockReason({ virtualScreen: true, pointerAvailable: false })
+  assert.match(
+    blockedReason, /xdotool/,
+    '虚拟屏里的窗口没人点得到，缺 xdotool 必须直接停下并给出安装办法，而不是等用户手动勾选'
+  )
+  assert.equal(
+    interactiveTakeoverBlockReason({ virtualScreen: true, pointerAvailable: false }),
+    blockedReason,
+    '同一环境下的拦截原因应当稳定，便于上层直接当失败原因回给用户'
+  )
+  assert.equal(
+    interactiveTakeoverBlockReason({ virtualScreen: true, pointerAvailable: true }), '',
+    '虚拟屏 + 有 xdotool 是正常的自动勾选路径，不能拦'
+  )
+  assert.equal(
+    interactiveTakeoverBlockReason({ virtualScreen: false, pointerAvailable: false }), '',
+    '本机有桌面时缺指针工具仍可由用户手动勾选，不能拦'
+  )
   assert.deepEqual(
     xdotoolWindowSearchArgs('relay-checkin tabitoken.com', 12345),
     [

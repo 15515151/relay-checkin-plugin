@@ -16,6 +16,7 @@ import {
   nativeMouseLocation,
   nativePointerUnavailable,
   nativeWindowGeometry,
+  needsVirtualDisplay,
   pointerDisplayFor
 } from './native.js'
 
@@ -1456,6 +1457,36 @@ function describePointerEnv(virtualDisplay, pointerDisplay) {
     : `本机桌面 ${pointerDisplay}${occupies}`
 }
 
+/**
+ * 可见接管在本机是否根本走不通。空串表示可行，非空即直接给用户看的原因。
+ *
+ * 无图形桌面的服务器上，验证窗口只能开在插件自建的 Xvfb 里：那块屏不接显示器，
+ * 用户看不见更点不到，唯一能操作它的就是 xdotool——而脱离 CDP 的流程本来也只靠
+ * 系统指针（一 attach 就会被判 bot，见 detachedTurnstileCheckin 的说明）。
+ * 所以这里缺 xdotool 不是「退回人工」而是死路：与其让每个账号白等一整个超时，
+ * 再报一句谁也做不到的「请手动勾选」，不如立刻停下并说清要装什么。
+ *
+ * 反过来，Windows / macOS / 有桌面的 Linux 上窗口是用户看得见的，缺工具时让人
+ * 自己勾选依然成立，不能拦。
+ */
+export function interactiveTakeoverBlockReason({
+  virtualScreen = needsVirtualDisplay(),
+  pointerAvailable = !nativePointerUnavailable()
+} = {}) {
+  if (!virtualScreen || pointerAvailable) return ''
+  return '本机没有图形桌面，人机验证只能开在虚拟屏里、没人能手动勾选，'
+    + '而自动勾选所需的 xdotool 未安装：请在机器人所在设备执行 apt install xdotool 后重试'
+}
+
+/** 环境不具备勾选能力时的统一结果，与其它 turnstileFailed 分支保持同一形状 */
+function takeoverBlockedOutcome(reason) {
+  return {
+    turnstileFailed: true,
+    message: reason,
+    detail: { stage: 'interactive-browser', reason: 'pointer-tool-missing', detail: reason }
+  }
+}
+
 let warnedWindowsSession = false
 
 /**
@@ -2244,7 +2275,8 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
     // 可变：指针工具是在第一次点击时才发现缺失的，发现后要能当场停掉自动点击
     let autoClick = Boolean(pointerDisplay) && !nativePointerUnavailable()
     logger.info(`[relay-checkin-plugin] ${host} 已断开调试连接进入人机验证，`
-      + `${autoClick ? '将自动勾选复选框' : '请在弹出的浏览器窗口中手动勾选'}（最多 ${timeoutSec} 秒）`)
+      + `${autoClick ? '将自动勾选复选框' : (display ? '但虚拟屏里的窗口没人能勾选' : '请在弹出的浏览器窗口中手动勾选')}`
+      + `（最多 ${timeoutSec} 秒）`)
     if (autoClick) {
       logger.info(`[relay-checkin-plugin] 复选框屏幕坐标 (${boxX}, ${boxY})｜`
         + `显示环境: ${describePointerEnv(display, pointerDisplay)}｜`
@@ -2278,10 +2310,17 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
           // 计数用 clickAttempts 而不是 round：挑战轮次只在点成功后才推进，
           // 用它做「第 N 次尝试」会让连续重试全部显示成第 1 次，看着像卡住了
           logger.warn(`[relay-checkin-plugin] 系统指针点击 ${host} 失败（第 ${clickAttempts} 次尝试，${clickDetail}）`)
-          // 缺 xdotool / PowerShell 是环境问题，等到超时也不会自己变好：
-          // 就地停掉自动点击改为等用户手动勾选，免得这条日志按探测间隔一直刷
+          // 缺 xdotool / PowerShell 是环境问题，等到超时也不会自己变好
           if (nativePointerUnavailable()) {
             autoClick = false
+            // 刚探到工具不在，不必再让 helper 重复探一遍
+            const blocked = interactiveTakeoverBlockReason({ pointerAvailable: false })
+            if (blocked) {
+              // 虚拟屏里没有第二个人能接手，把剩下的超时耗完也只是白等
+              logger.warn(`[relay-checkin-plugin] 放弃 ${host} 的可见接管：${blocked}`)
+              return takeoverBlockedOutcome(blocked)
+            }
+            // 本机有桌面：改为等用户自己勾选，同时别让这条日志按探测间隔一直刷
             logger.warn(`[relay-checkin-plugin] 不再尝试自动勾选 ${host}，`
               + '请在弹出的浏览器窗口中手动勾选复选框')
           }
@@ -2404,6 +2443,13 @@ export async function turnstileCheckin(account, { checkinPath, headers, validati
   const interactiveTimeoutSec = boundedSeconds(cfg.browser.turnstileInteractiveTimeoutSec, 120, 30, 600)
 
   if (turnstileBrowserMode(cfg.browser) === 'interactive') {
+    // 本机根本没人能勾选复选框时就地停下：无头模式在这种站点上同样过不了，退回去只是
+    // 多烧一个超时。这是本机缺工具，不是站点在拦，所以不记入该站点的熔断计数。
+    const blocked = interactiveTakeoverBlockReason()
+    if (blocked) {
+      logger.warn(`[relay-checkin-plugin] 跳过 ${host} 的人机验证：${blocked}`)
+      return takeoverBlockedOutcome(blocked)
+    }
     logger.info(`[relay-checkin-plugin] 将直接打开可见浏览器处理 ${host}，请在机器人运行设备上于 ${interactiveTimeoutSec} 秒内完成验证`)
     let interactive
     try {
@@ -2597,8 +2643,8 @@ function scheduleVirtualDisplayRelease(ms = 120000) {
  * @returns {string|null} 需要注入子进程的 DISPLAY，null 表示沿用当前环境
  */
 async function ensureVirtualDisplay() {
-  if (process.platform !== 'linux') return null
-  if (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) return null
+  // 判据与 needsVirtualDisplay() 共用一处，免得「要不要虚拟屏」和「能不能勾选」漂移
+  if (!needsVirtualDisplay()) return null
   if (xvfbReleaseTimer) {
     clearTimeout(xvfbReleaseTimer)
     xvfbReleaseTimer = null
