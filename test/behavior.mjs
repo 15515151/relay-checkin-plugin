@@ -50,7 +50,7 @@ try {
   const cfgNow = cfgMod.getConfig()
   cfgNow.security.allowedPrivateHosts = [
     'agentrouter.org', 'newapi.test', 'n.com', 'v.com', 'x.com', 't.com', 'anyrouter.top', 's2.test', 's2v2.test',
-    'nocap.test', 'nocap2.test', 'hascap.test', 'badcfg.test'
+    'nocap.test', 'nocap2.test', 'hascap.test', 'badcfg.test', 'flaky.test'
   ]
   // 同理，测试也不能受运行环境（data/config.yaml 或 config_default 模板）里的代理配置影响：
   // 命中 proxy.hosts 的站点会走 node:https + proxy agent，完全绕过上面的 mock fetch
@@ -418,6 +418,39 @@ try {
   const badCfg = await sub2api.login(mkS2Login('badcfg.test'))
   assert.equal(badCfg.ok, false)
   assert.match(badCfg.msg, /人机验证/, '读取不到设置应回退浏览器而非直接登录')
+
+  // 读不到设置只是「这次没读到」，不能当成永久结论：若把失败也长期缓存，站点抽一次风
+  // 就会让它在进程存活期内再也不试 HTTP 快路径，用户只能重启才能恢复
+  let flakySettings = 0
+  let flakyLogins = 0
+  routes = {
+    'GET https://flaky.test/api/v1/settings/public': () => {
+      flakySettings++
+      return flakySettings === 1 ? { status: 500, body: null } : { status: 200, body: capOffBody }
+    },
+    'POST https://flaky.test/api/v1/auth/login': () => {
+      flakyLogins++
+      return {
+        status: 200,
+        body: { code: 0, data: { access_token: 'AT-F', refresh_token: 'RT-F', expires_in: 86400 } }
+      }
+    }
+  }
+  assert.equal((await sub2api.login(mkS2Login('flaky.test'))).ok, false, '读不到设置时应回退浏览器')
+  assert.equal(flakyLogins, 0, '读不到设置时不应发登录请求')
+  assert.equal((await sub2api.login(mkS2Login('flaky.test'))).ok, false)
+  assert.equal(flakySettings, 1, '短时间内不应对设置接口连环重探')
+
+  const realNow = Date.now
+  Date.now = () => realNow() + 90 * 1000 // 越过「没读到」的短有效期
+  try {
+    assert.equal((await sub2api.login(mkS2Login('flaky.test'))).ok, true, '站点恢复后应重新探测并走 HTTP 登录')
+    assert.equal(flakySettings, 2, '短有效期过后应再探一次')
+    assert.equal((await sub2api.login(mkS2Login('flaky.test'))).ok, true)
+    assert.equal(flakySettings, 2, '确定的结论应在有效期内复用，不重复请求')
+  } finally {
+    Date.now = realNow
+  }
   cfgNow.browser.enable = savedBrowserEnable2
 
   // 签到全链路：状态未签 → POST 领取 → 状态复核已签；奖励与余额都是站点直接给的美元

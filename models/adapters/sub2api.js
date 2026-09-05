@@ -176,8 +176,15 @@ async function renewByRefreshToken(account) {
   return { ok: false, msg: msg || `刷新令牌无效 (HTTP ${res.status})` }
 }
 
-// 站点公共设置按 host 缓存：验证码开关很少变动，避免每次登录都多一次请求
+// 站点公共设置按 host 缓存：验证码开关很少变动，避免每次登录都多一次请求。
+// 缓存必须带有效期，且「读到了」和「没读到」要分开记：
+// 没读到（站点 5xx、超时、不是 Sub2API 形状）若按永久结论缓存，站点抽一次风就会让
+// 该站点在进程存活期内永久退回浏览器过码，只能重启才恢复；所以只给它很短的有效期，
+// 既挡住一轮批量签到里的连环重探，又能很快自己好。确定的结论也带有效期，
+// 好在站点日后改动验证码开关时自动跟上。
 const captchaFlagCache = new Map()
+const CAPTCHA_FLAG_TTL_MS = 10 * 60 * 1000
+const CAPTCHA_FLAG_MISS_TTL_MS = 60 * 1000
 
 /**
  * 站点是否三种验证码全部关闭。全部关闭时可直接 HTTP 登录，无需浏览器过码。
@@ -185,21 +192,29 @@ const captchaFlagCache = new Map()
  */
 async function captchaDisabled(account) {
   const host = hostOf(account)
-  if (captchaFlagCache.has(host)) return captchaFlagCache.get(host)
+  const cached = captchaFlagCache.get(host)
+  if (cached && cached.expiresAt > Date.now()) return cached.disabled
   let disabled = false
+  let known = false
   try {
-    const res = await request(apiUrl(account, '/settings/public'))
+    // 这只是省浏览器的快路径探测，探不到就照旧走浏览器，
+    // 不值得吃默认的重试 × 超时把一次登录拖上几十秒
+    const res = await request(apiUrl(account, '/settings/public'), { timeoutMs: 5000, maxRetry: 0 })
     const data = res.json?.data
     // 以字段存在为准而非仅看 HTTP 200：非 Sub2API 站点也可能在该路径返回其它内容
     if (res.status === 200 && res.json?.code === 0 && data && 'turnstile_enabled' in data) {
       disabled = data.turnstile_enabled !== true
         && data.aliyun_captcha_enabled !== true
         && data.tencent_captcha_enabled !== true
+      known = true
     }
   } catch {
     disabled = false
   }
-  captchaFlagCache.set(host, disabled)
+  captchaFlagCache.set(host, {
+    disabled,
+    expiresAt: Date.now() + (known ? CAPTCHA_FLAG_TTL_MS : CAPTCHA_FLAG_MISS_TTL_MS)
+  })
   return disabled
 }
 
